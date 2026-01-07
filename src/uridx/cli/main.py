@@ -5,11 +5,13 @@ from typing import Annotated, Optional
 
 import typer
 
+from uridx.cli.extract import app as extract_app
 from uridx.db.engine import init_db
 from uridx.db.operations import add_item, get_stats
 from uridx.search.hybrid import hybrid_search
 
 app = typer.Typer()
+app.add_typer(extract_app, name="extract")
 
 
 @app.command()
