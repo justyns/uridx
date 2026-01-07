@@ -28,6 +28,25 @@ Raw text:
 cat document.md | uridx ingest --text "file://docs/document.md"
 ```
 
+### Using docling for document extraction
+
+[Docling](https://github.com/docling-project/docling) handles PDFs, DOCX, XLSX, PPTX, HTML, images, and more with OCR and table extraction:
+
+```bash
+pip install docling
+
+# Single file
+docling myfile.pdf --to md | uridx ingest --text "file://$(realpath myfile.pdf)"
+
+# With OCR for scanned documents
+docling scanned.pdf --to md --ocr | uridx ingest --text "file://$(realpath scanned.pdf)"
+
+# Batch processing
+for f in *.pdf; do
+  docling "$f" --to md | uridx ingest --text "file://$(realpath "$f")"
+done
+```
+
 ### Search
 
 ```bash
