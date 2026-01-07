@@ -60,6 +60,12 @@ def init_db():
     conn = get_raw_connection()
     cursor = conn.cursor()
 
+    # Migration: add content_hash column if missing
+    cursor.execute("PRAGMA table_info(item)")
+    columns = [row[1] for row in cursor.fetchall()]
+    if "content_hash" not in columns:
+        cursor.execute("ALTER TABLE item ADD COLUMN content_hash TEXT")
+
     cursor.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='chunk_embeddings'")
     if not cursor.fetchone():
         cursor.execute(

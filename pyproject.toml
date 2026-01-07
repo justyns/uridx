@@ -19,6 +19,7 @@ uridx = "uridx.cli.main:app"
 
 [project.optional-dependencies]
 dev = ["ruff"]
+pdf = ["pdfplumber>=0.10"]
 
 [tool.ruff]
 line-length = 120

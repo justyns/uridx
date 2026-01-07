@@ -70,7 +70,7 @@ def ingest(
                 source_type=data.get("source_type"),
                 tags=data.get("tags"),
                 chunks=data.get("chunks", []),
-                replace=replace,
+                replace=data.get("replace", replace),
             )
             count += 1
         print(json.dumps({"ingested": count}))

@@ -29,6 +29,7 @@ class Item(SQLModel, table=True):
     title: Optional[str] = None
     source_type: Optional[str] = Field(default=None, index=True)
     context: Optional[str] = None
+    content_hash: Optional[str] = Field(default=None, index=True)
     expires_at: Optional[datetime] = Field(default=None, index=True)
     created_at: datetime = Field(default_factory=datetime.utcnow)
     updated_at: datetime = Field(default_factory=datetime.utcnow)

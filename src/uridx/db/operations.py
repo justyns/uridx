@@ -1,4 +1,6 @@
+import hashlib
 import json
+import sys
 from datetime import datetime
 
 from sqlmodel import func, select
@@ -7,6 +9,12 @@ from uridx.config import OLLAMA_BASE_URL, OLLAMA_EMBED_MODEL
 from uridx.db.engine import get_raw_connection, get_session
 from uridx.db.models import Chunk, Item, Tag
 from uridx.embeddings.ollama import get_embeddings_sync, serialize_embedding
+
+
+def compute_content_hash(chunks: list[dict]) -> str:
+    """Compute SHA256 hash of chunk texts for change detection."""
+    content = "\n".join(c.get("text", "") for c in chunks)
+    return hashlib.sha256(content.encode()).hexdigest()[:32]
 
 
 def add_item(
@@ -21,18 +29,57 @@ def add_item(
 ) -> Item:
     chunks = chunks or []
     tags = tags or []
+    new_hash = compute_content_hash(chunks)
 
     with get_session() as session:
         existing = session.exec(select(Item).where(Item.source_uri == source_uri)).first()
 
+        if existing and existing.content_hash and existing.content_hash == new_hash:
+            print(f"  Skipping {source_uri} (unchanged)", file=sys.stderr)
+            existing.title = title
+            existing.source_type = source_type
+            existing.context = context
+            existing.expires_at = expires_at
+            existing.updated_at = datetime.utcnow()
+
+            # Update tags even when content unchanged
+            existing_tags = {t.tag for t in existing.tags}
+            new_tags = set(tags)
+            if existing_tags != new_tags:
+                for tag in list(existing.tags):
+                    session.delete(tag)
+                for tag_name in tags:
+                    session.add(Tag(item_id=existing.id, tag=tag_name))
+
+            session.commit()
+            session.refresh(existing)
+            _ = existing.chunks
+            _ = existing.tags
+            session.expunge(existing)
+            return existing
+
         if existing and replace:
-            delete_item(source_uri)
+            chunk_ids = [c.id for c in existing.chunks]
+            if chunk_ids:
+                conn = get_raw_connection()
+                cursor = conn.cursor()
+                placeholders = ",".join("?" * len(chunk_ids))
+                cursor.execute(f"DELETE FROM chunk_embeddings WHERE chunk_id IN ({placeholders})", chunk_ids)
+                conn.commit()
+                conn.close()
+            for chunk in list(existing.chunks):
+                session.delete(chunk)
+            for tag in list(existing.tags):
+                session.delete(tag)
+            session.delete(existing)
+            session.commit()
             existing = None
 
         if existing:
             existing.title = title
             existing.source_type = source_type
             existing.context = context
+            existing.content_hash = new_hash
             existing.expires_at = expires_at
             existing.updated_at = datetime.utcnow()
 
@@ -119,6 +166,7 @@ def add_item(
             title=title,
             source_type=source_type,
             context=context,
+            content_hash=new_hash,
             expires_at=expires_at,
         )
         session.add(item)
