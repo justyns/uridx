@@ -7,6 +7,11 @@ from uridx.search.hybrid import hybrid_search
 mcp = FastMCP("uridx")
 
 
+def _clean_dict(**kwargs) -> dict:
+    """Build dict omitting None values and empty lists."""
+    return {k: v for k, v in kwargs.items() if v is not None and v != []}
+
+
 @mcp.tool()
 def search(
     query: str,
@@ -14,6 +19,7 @@ def search(
     source_type: str | None = None,
     tags: list[str] | None = None,
     semantic: bool = True,
+    recency_boost: float = 0.3,
 ) -> list[dict]:
     """Search the uridx knowledge base for relevant content.
 
@@ -27,6 +33,7 @@ def search(
         source_type: Filter by type (e.g., "note", "bookmark", "document")
         tags: Filter results to items containing all specified tags
         semantic: Use semantic search (True) or keyword-only search (False)
+        recency_boost: Boost recent items (0.0-1.0, default 0.3)
 
     Returns:
         List of matching items with source_uri, title, source_type, snippet, score, and tags
@@ -37,17 +44,19 @@ def search(
         source_type=source_type,
         tags=tags,
         semantic=semantic,
+        recency_boost=recency_boost,
     )
 
     return [
-        {
-            "source_uri": r.source_uri,
-            "title": r.title,
-            "source_type": r.source_type,
-            "snippet": r.chunk_text,
-            "score": r.score,
-            "tags": r.tags,
-        }
+        _clean_dict(
+            source_uri=r.source_uri,
+            title=r.title,
+            source_type=r.source_type,
+            snippet=r.chunk_text,
+            score=round(r.score, 3),
+            created_at=r.created_at.isoformat() if r.created_at else None,
+            tags=r.tags if r.tags else None,
+        )
         for r in results
     ]
 
@@ -126,16 +135,16 @@ def get(source_uri: str) -> dict | None:
     if not item:
         return None
 
-    return {
-        "source_uri": item.source_uri,
-        "title": item.title,
-        "source_type": item.source_type,
-        "context": item.context,
-        "created_at": item.created_at.isoformat() if item.created_at else None,
-        "updated_at": item.updated_at.isoformat() if item.updated_at else None,
-        "chunks": [{"text": c.text, "key": c.chunk_key} for c in item.chunks],
-        "tags": [t.tag for t in item.tags],
-    }
+    return _clean_dict(
+        source_uri=item.source_uri,
+        title=item.title,
+        source_type=item.source_type,
+        context=item.context,
+        created_at=item.created_at.isoformat() if item.created_at else None,
+        updated_at=item.updated_at.isoformat() if item.updated_at else None,
+        chunks=[{"text": c.text, "key": c.chunk_key} for c in item.chunks],
+        tags=[t.tag for t in item.tags] if item.tags else None,
+    )
 
 
 def run_server():

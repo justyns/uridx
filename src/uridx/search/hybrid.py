@@ -1,4 +1,5 @@
 from dataclasses import dataclass, field
+from datetime import datetime, timezone
 
 from sqlmodel import select
 
@@ -16,6 +17,12 @@ class SearchResult:
     chunk_text: str
     score: float
     tags: list[str] = field(default_factory=list)
+    created_at: datetime | None = None
+
+
+def escape_fts_query(query: str) -> str:
+    """Escape a query string for FTS5 by treating it as a phrase search."""
+    return f'"{query.replace('"', '""')}"'
 
 
 def hybrid_search(
@@ -24,6 +31,7 @@ def hybrid_search(
     source_type: str | None = None,
     tags: list[str] | None = None,
     semantic: bool = True,
+    recency_boost: float = 0.3,
 ) -> list[SearchResult]:
     conn = get_raw_connection()
     cursor = conn.cursor()
@@ -40,7 +48,7 @@ def hybrid_search(
 
         cursor.execute(
             "SELECT rowid, bm25(chunks_fts) as score FROM chunks_fts WHERE chunks_fts MATCH ? ORDER BY score LIMIT ?",
-            (query, limit * 3),
+            (escape_fts_query(query), limit * 3),
         )
         fts_results = cursor.fetchall()
 
@@ -67,7 +75,7 @@ def hybrid_search(
     else:
         cursor.execute(
             "SELECT rowid, bm25(chunks_fts) as score FROM chunks_fts WHERE chunks_fts MATCH ? ORDER BY score LIMIT ?",
-            (query, limit * 3),
+            (escape_fts_query(query), limit * 3),
         )
         fts_results = cursor.fetchall()
 
@@ -117,8 +125,21 @@ def hybrid_search(
                     chunk_text=chunk.text,
                     score=score_map.get(chunk.id, 0.0),
                     tags=[t.tag for t in item_tags],
+                    created_at=item.created_at,
                 )
             )
+
+        if recency_boost > 0 and results:
+            now = datetime.now(timezone.utc)
+            max_age_days = 365.0
+            for r in results:
+                if r.created_at:
+                    created = r.created_at.replace(tzinfo=timezone.utc) if r.created_at.tzinfo is None else r.created_at
+                    age_days = (now - created).total_seconds() / 86400
+                    age_score = max(0.0, 1.0 - (age_days / max_age_days))
+                else:
+                    age_score = 0.0
+                r.score = r.score * (1 - recency_boost) + age_score * recency_boost
 
         results.sort(key=lambda x: x.score, reverse=True)
         return results[:limit]

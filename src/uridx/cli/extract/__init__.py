@@ -9,11 +9,12 @@ from importlib.metadata import entry_points
 
 import typer
 
-from . import claude_code, image, markdown, pdf
+from . import claude_code, docling, image, markdown, pdf
 
 app = typer.Typer(help="Extract content to JSONL for ingestion")
 
 app.command("claude-code")(claude_code.extract)
+app.command("docling")(docling.extract)
 app.command("markdown")(markdown.extract)
 app.command("pdf")(pdf.extract)
 app.command("image")(image.extract)

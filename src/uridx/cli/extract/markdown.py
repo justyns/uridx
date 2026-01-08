@@ -8,7 +8,7 @@ from typing import Annotated, Optional
 
 import typer
 
-from .base import output
+from .base import get_file_mtime, output, resolve_paths
 
 EXTENSIONS = {".md", ".markdown"}
 
@@ -73,17 +73,10 @@ def _parse(path: Path) -> list[dict]:
 
 
 def extract(
-    path: Annotated[Optional[Path], typer.Argument(help="File or directory")] = None,
+    paths: Annotated[Optional[list[Path]], typer.Argument(help="Files or directories")] = None,
 ):
     """Extract markdown files, splitting by headings."""
-    root = path or Path.cwd()
-
-    if root.is_file():
-        files = [root]
-    else:
-        files = [f for f in root.rglob("*") if f.suffix.lower() in EXTENSIONS and f.is_file()]
-
-    for md_file in files:
+    for md_file in resolve_paths(paths or [], EXTENSIONS):
         try:
             chunks = _parse(md_file)
         except Exception as e:
@@ -102,5 +95,6 @@ def extract(
                 "source_type": "markdown",
                 "context": json.dumps({"path": str(md_file)}),
                 "replace": True,
+                "created_at": get_file_mtime(md_file),
             }
         )

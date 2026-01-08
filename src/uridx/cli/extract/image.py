@@ -10,13 +10,13 @@ from typing import Annotated, Optional
 import httpx
 import typer
 
-from .base import output
+from .base import get_file_mtime, output, resolve_paths
 
 EXTENSIONS = {".jpg", ".jpeg", ".png", ".gif", ".webp", ".bmp"}
 
 
 def extract(
-    path: Annotated[Optional[Path], typer.Argument(help="File or directory")] = None,
+    paths: Annotated[Optional[list[Path]], typer.Argument(help="Files or directories")] = None,
     model: Annotated[str, typer.Option("--model", "-m", help="Vision model")] = "",
     base_url: Annotated[str, typer.Option("--base-url", help="Ollama URL")] = "",
 ):
@@ -24,14 +24,7 @@ def extract(
     ollama_url = base_url or os.getenv("OLLAMA_BASE_URL", "http://localhost:11434")
     vision_model = model or os.getenv("OLLAMA_VISION_MODEL", "llama3.2-vision")
 
-    root = path or Path.cwd()
-
-    if root.is_file():
-        files = [root]
-    else:
-        files = [f for f in root.rglob("*") if f.suffix.lower() in EXTENSIONS and f.is_file()]
-
-    for img_file in files:
+    for img_file in resolve_paths(paths or [], EXTENSIONS):
         try:
             with open(img_file, "rb") as f:
                 image_data = base64.b64encode(f.read()).decode("utf-8")
@@ -69,5 +62,6 @@ def extract(
                 "source_type": "image",
                 "context": json.dumps({"path": str(img_file), "vision_model": vision_model}),
                 "replace": True,
+                "created_at": get_file_mtime(img_file),
             }
         )
