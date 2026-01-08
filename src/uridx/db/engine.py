@@ -11,6 +11,68 @@ from uridx.embeddings.ollama import get_dimension
 _engine = None
 
 
+def _ensure_fts_table(cursor):
+    """Ensure FTS table exists with correct configuration, migrating if needed."""
+    cursor.execute("SELECT sql FROM sqlite_master WHERE type='table' AND name='chunks_fts'")
+    row = cursor.fetchone()
+
+    needs_recreate = False
+    if row:
+        create_sql = row[0] or ""
+        # Check if triggers use old FTS delete command syntax (VALUES('delete',...))
+        cursor.execute("SELECT sql FROM sqlite_master WHERE type='trigger' AND name='chunks_ad'")
+        trigger_row = cursor.fetchone()
+        trigger_sql = trigger_row[0] if trigger_row else ""
+        uses_old_delete = "VALUES('delete'" in trigger_sql or "VALUES ('delete'" in trigger_sql
+
+        # Recreate if: missing contentless_delete, has context column, or triggers use old syntax
+        if "contentless_delete=1" not in create_sql or "context" in create_sql or uses_old_delete:
+            needs_recreate = True
+            cursor.execute("DROP TRIGGER IF EXISTS chunks_ai")
+            cursor.execute("DROP TRIGGER IF EXISTS chunks_ad")
+            cursor.execute("DROP TRIGGER IF EXISTS chunks_au")
+            cursor.execute("DROP TABLE chunks_fts")
+
+    if not row or needs_recreate:
+        cursor.execute(
+            """
+            CREATE VIRTUAL TABLE chunks_fts USING fts5(
+                text,
+                content='',
+                contentless_delete=1
+            )
+            """
+        )
+
+        cursor.execute(
+            """
+            CREATE TRIGGER chunks_ai AFTER INSERT ON chunk BEGIN
+                INSERT INTO chunks_fts(rowid, text) VALUES (NEW.id, NEW.text);
+            END
+            """
+        )
+
+        cursor.execute(
+            """
+            CREATE TRIGGER chunks_ad AFTER DELETE ON chunk BEGIN
+                DELETE FROM chunks_fts WHERE rowid = OLD.id;
+            END
+            """
+        )
+
+        cursor.execute(
+            """
+            CREATE TRIGGER chunks_au AFTER UPDATE ON chunk BEGIN
+                DELETE FROM chunks_fts WHERE rowid = OLD.id;
+                INSERT INTO chunks_fts(rowid, text) VALUES (NEW.id, NEW.text);
+            END
+            """
+        )
+
+        if needs_recreate:
+            cursor.execute("INSERT INTO chunks_fts(rowid, text) SELECT id, text FROM chunk")
+
+
 def get_engine():
     global _engine
     if _engine is not None:
@@ -77,55 +139,7 @@ def init_db():
             """
         )
 
-    cursor.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='chunks_fts'")
-    if not cursor.fetchone():
-        cursor.execute(
-            """
-            CREATE VIRTUAL TABLE chunks_fts USING fts5(
-                text,
-                context,
-                content='',
-                contentless_delete=1
-            )
-            """
-        )
-
-        cursor.execute(
-            """
-            CREATE TRIGGER chunks_ai AFTER INSERT ON chunk BEGIN
-                INSERT INTO chunks_fts(rowid, text, context)
-                SELECT NEW.id, NEW.text, COALESCE(
-                    (SELECT context FROM item WHERE id = NEW.item_id), ''
-                );
-            END
-            """
-        )
-
-        cursor.execute(
-            """
-            CREATE TRIGGER chunks_ad AFTER DELETE ON chunk BEGIN
-                INSERT INTO chunks_fts(chunks_fts, rowid, text, context)
-                SELECT 'delete', OLD.id, OLD.text, COALESCE(
-                    (SELECT context FROM item WHERE id = OLD.item_id), ''
-                );
-            END
-            """
-        )
-
-        cursor.execute(
-            """
-            CREATE TRIGGER chunks_au AFTER UPDATE ON chunk BEGIN
-                INSERT INTO chunks_fts(chunks_fts, rowid, text, context)
-                SELECT 'delete', OLD.id, OLD.text, COALESCE(
-                    (SELECT context FROM item WHERE id = OLD.item_id), ''
-                );
-                INSERT INTO chunks_fts(rowid, text, context)
-                SELECT NEW.id, NEW.text, COALESCE(
-                    (SELECT context FROM item WHERE id = NEW.item_id), ''
-                );
-            END
-            """
-        )
+    _ensure_fts_table(cursor)
 
     conn.commit()
     conn.close()

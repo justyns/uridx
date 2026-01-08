@@ -37,10 +37,15 @@ def add_item(
     tags: list[str] | None = None,
     expires_at: datetime | None = None,
     replace: bool = False,  # kept for API compatibility, ignored
+    created_at: datetime | str | None = None,
 ) -> Item:
     chunks = chunks or []
     tags = tags or []
     new_hash = compute_content_hash(chunks)
+
+    # Parse created_at if string
+    if isinstance(created_at, str):
+        created_at = datetime.fromisoformat(created_at.replace("Z", "+00:00"))
 
     with get_session() as session:
         existing = session.exec(select(Item).where(Item.source_uri == source_uri)).first()
@@ -83,6 +88,8 @@ def add_item(
             context=context,
             content_hash=new_hash,
             expires_at=expires_at,
+            created_at=created_at or datetime.utcnow(),
+            updated_at=created_at or datetime.utcnow(),
         )
         session.add(item)
         session.flush()
@@ -136,6 +143,10 @@ def delete_item(source_uri: str) -> bool:
             return False
 
         _delete_chunk_embeddings([c.id for c in item.chunks])
+        for chunk in list(item.chunks):
+            session.delete(chunk)
+        for tag in list(item.tags):
+            session.delete(tag)
         session.delete(item)
         session.commit()
         return True
