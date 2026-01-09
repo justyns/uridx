@@ -7,6 +7,9 @@ from typing import Annotated, Optional
 
 import typer
 
+from uridx.config import URIDX_API_URL
+from uridx.db.operations import get_existing_source_uris
+
 from .base import output
 
 
@@ -132,6 +135,7 @@ def _parse_conversation(jsonl_path: Path) -> dict | None:
 
 def extract(
     path: Annotated[Optional[Path], typer.Argument(help="Projects directory")] = None,
+    force: Annotated[bool, typer.Option("--force", "-f", help="Re-process all files even if already ingested")] = False,
 ):
     """Extract Claude Code conversations from ~/.claude/projects/"""
     projects_dir = path or (Path.home() / ".claude" / "projects")
@@ -140,33 +144,50 @@ def extract(
         print(f"Projects directory not found: {projects_dir}", file=sys.stderr)
         raise typer.Exit(1)
 
+    # Build list of source_uris that will be generated
+    source_uri_map: dict[str, tuple[Path, str]] = {}  # uri -> (jsonl_file, project_hash)
     for project_dir in projects_dir.iterdir():
         if not project_dir.is_dir():
             continue
-
         project_hash = project_dir.name
-
         for jsonl_file in project_dir.glob("*.jsonl"):
             if jsonl_file.stat().st_size == 0:
                 continue
+            uri = f"claude-code://{project_hash}/{jsonl_file.stem}"
+            source_uri_map[uri] = (jsonl_file, project_hash)
 
-            try:
-                result = _parse_conversation(jsonl_file)
-            except Exception as e:
-                print(f"Error parsing {jsonl_file}: {e}", file=sys.stderr)
-                continue
+    # Check which already exist (unless --force)
+    if not force and source_uri_map:
+        if not URIDX_API_URL:
+            from uridx.db.engine import init_db
 
-            if not result or not result["chunks"]:
-                continue
+            init_db()
+        existing = get_existing_source_uris(list(source_uri_map.keys()))
+        for uri in existing:
+            print(f"Skipping {source_uri_map[uri][0]} (already ingested)", file=sys.stderr)
+            del source_uri_map[uri]
 
-            output(
-                {
-                    "source_uri": f"claude-code://{project_hash}/{jsonl_file.stem}",
-                    "chunks": result["chunks"],
-                    "tags": ["claude-code", "conversation"],
-                    "title": result["title"],
-                    "source_type": "claude-code",
-                    "context": json.dumps(result["metadata"]),
-                    "replace": True,
-                }
-            )
+    if not source_uri_map:
+        return
+
+    for source_uri, (jsonl_file, project_hash) in source_uri_map.items():
+        try:
+            result = _parse_conversation(jsonl_file)
+        except Exception as e:
+            print(f"Error parsing {jsonl_file}: {e}", file=sys.stderr)
+            continue
+
+        if not result or not result["chunks"]:
+            continue
+
+        output(
+            {
+                "source_uri": source_uri,
+                "chunks": result["chunks"],
+                "tags": ["claude-code", "conversation"],
+                "title": result["title"],
+                "source_type": "claude-code",
+                "context": json.dumps(result["metadata"]),
+                "replace": True,
+            }
+        )

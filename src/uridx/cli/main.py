@@ -29,10 +29,12 @@ def search(
     results = hybrid_search(query, limit=limit, source_type=type, tags=tag)
 
     if json_output:
+
         def _json_default(o):
             if isinstance(o, datetime):
                 return o.isoformat()
             raise TypeError(f"Object of type {type(o)} is not JSON serializable")
+
         print(json.dumps([asdict(r) for r in results], indent=2, default=_json_default))
     else:
         for r in results:

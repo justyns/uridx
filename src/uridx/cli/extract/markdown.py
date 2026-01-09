@@ -8,6 +8,9 @@ from typing import Annotated, Optional
 
 import typer
 
+from uridx.config import URIDX_API_URL
+from uridx.db.operations import get_existing_source_uris
+
 from .base import get_file_mtime, output, resolve_paths
 
 EXTENSIONS = {".md", ".markdown"}
@@ -74,9 +77,30 @@ def _parse(path: Path) -> list[dict]:
 
 def extract(
     paths: Annotated[Optional[list[Path]], typer.Argument(help="Files or directories")] = None,
+    force: Annotated[bool, typer.Option("--force", "-f", help="Re-process all files even if already ingested")] = False,
 ):
     """Extract markdown files, splitting by headings."""
+    # Build list of source_uris that will be generated
+    source_uri_map: dict[str, Path] = {}
     for md_file in resolve_paths(paths or [], EXTENSIONS):
+        uri = f"file://{md_file.resolve()}"
+        source_uri_map[uri] = md_file
+
+    # Check which already exist (unless --force)
+    if not force and source_uri_map:
+        if not URIDX_API_URL:
+            from uridx.db.engine import init_db
+
+            init_db()
+        existing = get_existing_source_uris(list(source_uri_map.keys()))
+        for uri in existing:
+            print(f"Skipping {source_uri_map[uri]} (already ingested)", file=sys.stderr)
+            del source_uri_map[uri]
+
+    if not source_uri_map:
+        return
+
+    for source_uri, md_file in source_uri_map.items():
         try:
             chunks = _parse(md_file)
         except Exception as e:
@@ -88,7 +112,7 @@ def extract(
 
         output(
             {
-                "source_uri": f"file://{md_file.resolve()}",
+                "source_uri": source_uri,
                 "chunks": chunks,
                 "tags": ["markdown", "document"],
                 "title": md_file.stem,

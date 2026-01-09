@@ -3,9 +3,10 @@ import json
 import sys
 from datetime import datetime
 
+import httpx
 from sqlmodel import func, select
 
-from uridx.config import OLLAMA_BASE_URL, OLLAMA_EMBED_MODEL
+from uridx.config import OLLAMA_BASE_URL, OLLAMA_EMBED_MODEL, URIDX_API_URL
 from uridx.db.engine import get_raw_connection, get_session
 from uridx.db.models import Chunk, Item, Tag
 from uridx.embeddings.ollama import get_embeddings_sync, serialize_embedding
@@ -182,3 +183,24 @@ def get_stats() -> dict:
             "tags": tags_count,
             "source_types": source_types,
         }
+
+
+def get_existing_source_uris(uris: list[str]) -> set[str]:
+    """Return which source_uris already exist. Uses local DB or remote API based on config."""
+    if not uris:
+        return set()
+    if URIDX_API_URL:
+        return _get_existing_remote(uris)
+    return _get_existing_local(uris)
+
+
+def _get_existing_local(uris: list[str]) -> set[str]:
+    with get_session() as session:
+        existing = session.exec(select(Item.source_uri).where(Item.source_uri.in_(uris))).all()
+        return set(existing)
+
+
+def _get_existing_remote(uris: list[str]) -> set[str]:
+    response = httpx.post(f"{URIDX_API_URL}/exists", json={"source_uris": uris}, timeout=30)
+    response.raise_for_status()
+    return set(response.json().get("existing", []))

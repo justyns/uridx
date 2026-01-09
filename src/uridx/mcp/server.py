@@ -1,10 +1,21 @@
 from fastmcp import FastMCP
+from starlette.requests import Request
+from starlette.responses import JSONResponse
 
 from uridx.db.engine import init_db
-from uridx.db.operations import add_item, delete_item, get_item
+from uridx.db.operations import _get_existing_local, add_item, delete_item, get_item
 from uridx.search.hybrid import hybrid_search
 
 mcp = FastMCP("uridx")
+
+
+@mcp.custom_route("/exists", methods=["POST"])
+async def exists_endpoint(request: Request) -> JSONResponse:
+    """Check which source_uris already exist in the index."""
+    data = await request.json()
+    uris = data.get("source_uris", [])
+    existing = _get_existing_local(uris)
+    return JSONResponse({"existing": list(existing)})
 
 
 def _clean_dict(**kwargs) -> dict:

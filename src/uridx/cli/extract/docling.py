@@ -8,18 +8,34 @@ from urllib.parse import urlparse
 
 import typer
 
+from uridx.config import URIDX_API_URL
+from uridx.db.operations import get_existing_source_uris
+
 from .base import get_file_mtime, output, resolve_paths
 
 SUPPORTED_EXTENSIONS = {
-    ".pdf", ".docx", ".xlsx", ".pptx",
-    ".html", ".xhtml", ".htm",
-    ".png", ".jpg", ".jpeg", ".tiff", ".bmp", ".webp",
-    ".md", ".adoc", ".csv",
+    ".pdf",
+    ".docx",
+    ".xlsx",
+    ".pptx",
+    ".html",
+    ".xhtml",
+    ".htm",
+    ".png",
+    ".jpg",
+    ".jpeg",
+    ".tiff",
+    ".bmp",
+    ".webp",
+    ".md",
+    ".adoc",
+    ".csv",
 }
 
 
 def extract(
     sources: Annotated[Optional[list[str]], typer.Argument(help="Files, directories, or URLs")] = None,
+    force: Annotated[bool, typer.Option("--force", "-f", help="Re-process all files even if already ingested")] = False,
 ):
     """Extract documents using docling (requires docling)."""
     try:
@@ -29,18 +45,37 @@ def extract(
         print("docling not installed. Install with: uv pip install 'uridx[docling]'", file=sys.stderr)
         raise typer.Exit(1)
 
-    converter = DocumentConverter()
-    chunker = HybridChunker()
-
     sources = sources or []
     urls = [s for s in sources if s.startswith(("http://", "https://"))]
     local_paths = [Path(s) for s in sources if not s.startswith(("http://", "https://"))]
 
+    # Build list of source_uris that will be generated
+    source_uri_map: dict[str, tuple[str, str | None]] = {}
     for url in urls:
-        _convert_source(converter, chunker, url, url, created_at=None)
-
+        source_uri_map[url] = (url, None)
     for file_path in resolve_paths(local_paths, SUPPORTED_EXTENSIONS):
-        _convert_source(converter, chunker, str(file_path), f"file://{file_path.resolve()}", created_at=get_file_mtime(file_path))
+        uri = f"file://{file_path.resolve()}"
+        source_uri_map[uri] = (str(file_path), get_file_mtime(file_path))
+
+    # Check which already exist (unless --force)
+    if not force and source_uri_map:
+        if not URIDX_API_URL:
+            from uridx.db.engine import init_db
+
+            init_db()
+        existing = get_existing_source_uris(list(source_uri_map.keys()))
+        for uri in existing:
+            print(f"Skipping {source_uri_map[uri][0]} (already ingested)", file=sys.stderr)
+            del source_uri_map[uri]
+
+    if not source_uri_map:
+        return
+
+    converter = DocumentConverter()
+    chunker = HybridChunker()
+
+    for source_uri, (source, created_at) in source_uri_map.items():
+        _convert_source(converter, chunker, source, source_uri, created_at=created_at)
 
 
 def _convert_source(converter, chunker, source: str, source_uri: str, created_at: str | None = None):
