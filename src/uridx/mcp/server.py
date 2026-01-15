@@ -158,6 +158,9 @@ def get(source_uri: str) -> dict | None:
     )
 
 
-def run_server():
+def run_server(http: bool = False, port: int = 8000):
     init_db()
-    mcp.run()
+    if http:
+        mcp.run(transport="sse", port=port)
+    else:
+        mcp.run()

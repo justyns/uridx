@@ -104,10 +104,13 @@ def stats():
 
 
 @app.command()
-def serve():
+def serve(
+    http: Annotated[bool, typer.Option("--http", help="Run as HTTP server (SSE transport)")] = False,
+    port: Annotated[int, typer.Option("--port", "-p", help="HTTP server port")] = 8000,
+):
     from uridx.mcp.server import run_server
 
-    run_server()
+    run_server(http=http, port=port)
 
 
 if __name__ == "__main__":

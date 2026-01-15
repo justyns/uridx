@@ -60,12 +60,25 @@ uridx stats
 ### MCP Server
 
 ```bash
+# stdio mode (for MCP clients like Claude Desktop)
 uridx serve
+
+# HTTP mode (for remote API access)
+uridx serve --http --port 8000
 ```
 
 ## Configuration
 
 Environment variables:
-- `URIDX_DB_PATH` - Database path (default: `~/.local/share/uridx/uridx.db`)
-- `OLLAMA_BASE_URL` - Ollama API URL (default: `http://localhost:11434`)
-- `OLLAMA_EMBED_MODEL` - Embedding model (default: `qwen3-embedding:0.6b`)
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `URIDX_DB_PATH` | `~/.local/share/uridx/uridx.db` | SQLite database path |
+| `URIDX_API_URL` | (none) | Remote uridx server URL for extractors |
+| `OLLAMA_BASE_URL` | `http://localhost:11434` | Ollama API URL |
+| `OLLAMA_EMBED_MODEL` | `qwen3-embedding:0.6b` | Embedding model |
+
+Example with remote Ollama:
+```bash
+OLLAMA_BASE_URL=http://my-server:11434 uridx serve
+```
