@@ -199,7 +199,7 @@ def search(
     Args:
         query: Natural language search query describing what you're looking for
         limit: Maximum number of results to return (default 10)
-        source_type: Filter by type (e.g., "note", "bookmark", "document")
+        source_type: Filter by type (e.g., "note", "memory", "bookmark", "document", "chat")
         tags: Filter results to items containing all specified tags
         semantic: Use semantic search (True) or keyword-only search (False)
         recency_boost: Boost recent items (0.0-1.0, default 0.3)
@@ -239,16 +239,17 @@ def add(
     tags: list[str] | None = None,
     context: str | None = None,
 ) -> dict:
-    """Add a new item to the uridx knowledge base.
+    """Add or update an item in the uridx knowledge base.
 
-    Use this tool to store notes, bookmarks, or other content for later retrieval.
+    Use this tool to store notes, memories, bookmarks, or other content for later
+    retrieval. If an item with the same source_uri already exists, it will be updated.
     The text will be indexed for both semantic and keyword search.
 
     Args:
-        source_uri: Unique identifier for this item (e.g., URL or custom URI)
+        source_uri: Unique identifier for this item (e.g., URL, "memory://topic/name")
         title: Human-readable title for the item
         text: The main content to store and index
-        source_type: Category of content (default "note")
+        source_type: Category of content: "note", "memory", "bookmark", "document", "chat"
         tags: Optional list of tags for filtering
         context: Optional additional context to improve search relevance
 
@@ -325,11 +326,11 @@ def list_recent(
     """List recent items from the uridx knowledge base.
 
     Use this to browse items by recency without requiring a search query.
-    Useful for seeing recent notes, documents, or other content.
+    Useful for seeing recent notes, memories, or other content.
 
     Args:
         limit: Maximum number of items to return (default 10)
-        source_type: Filter by type (e.g., "note", "bookmark", "document", "chat")
+        source_type: Filter by type (e.g., "note", "memory", "bookmark", "document", "chat")
         tags: Filter items containing all specified tags
 
     Returns:
