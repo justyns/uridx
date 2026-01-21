@@ -7,7 +7,13 @@ from starlette.responses import HTMLResponse, JSONResponse, RedirectResponse
 
 from uridx.config import URIDX_AUTH_TOKEN, URIDX_BASE_URL, URIDX_OAUTH_PASSWORD
 from uridx.db.engine import init_db
-from uridx.db.operations import _get_existing_local, add_item, delete_item, get_item
+from uridx.db.operations import (
+    _get_existing_local,
+    add_item,
+    delete_item,
+    get_item,
+    list_recent as list_recent_items,
+)
 from uridx.search.hybrid import hybrid_search
 
 _oauth_provider = None
@@ -308,6 +314,40 @@ def get(source_uri: str) -> dict | None:
         chunks=[{"text": c.text, "key": c.chunk_key} for c in item.chunks],
         tags=[t.tag for t in item.tags] if item.tags else None,
     )
+
+
+@mcp.tool(annotations={"readOnlyHint": True})
+def list_recent(
+    limit: int = 10,
+    source_type: str | None = None,
+    tags: list[str] | None = None,
+) -> list[dict]:
+    """List recent items from the uridx knowledge base.
+
+    Use this to browse items by recency without requiring a search query.
+    Useful for seeing recent notes, documents, or other content.
+
+    Args:
+        limit: Maximum number of items to return (default 10)
+        source_type: Filter by type (e.g., "note", "bookmark", "document", "chat")
+        tags: Filter items containing all specified tags
+
+    Returns:
+        List of items with source_uri, title, source_type, created_at, updated_at, and tags
+    """
+    items = list_recent_items(limit=limit, source_type=source_type, tags=tags)
+
+    return [
+        _clean_dict(
+            source_uri=item.source_uri,
+            title=item.title,
+            source_type=item.source_type,
+            created_at=item.created_at.isoformat() if item.created_at else None,
+            updated_at=item.updated_at.isoformat() if item.updated_at else None,
+            tags=[t.tag for t in item.tags] if item.tags else None,
+        )
+        for item in items
+    ]
 
 
 def run_server(http: bool = False, host: str = "127.0.0.1", port: int = 8000):

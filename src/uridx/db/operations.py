@@ -204,3 +204,31 @@ def _get_existing_remote(uris: list[str]) -> set[str]:
     response = httpx.post(f"{URIDX_API_URL}/exists", json={"source_uris": uris}, timeout=30)
     response.raise_for_status()
     return set(response.json().get("existing", []))
+
+
+def list_recent(
+    limit: int = 10,
+    source_type: str | None = None,
+    tags: list[str] | None = None,
+) -> list[Item]:
+    """List items sorted by updated_at (most recent first)."""
+    with get_session() as session:
+        query = select(Item).order_by(Item.updated_at.desc())
+
+        if source_type:
+            query = query.where(Item.source_type == source_type)
+
+        items = session.exec(query).all()
+
+        if tags:
+            tag_set = set(tags)
+            items = [i for i in items if tag_set <= {t.tag for t in i.tags}]
+
+        items = items[:limit]
+
+        for item in items:
+            _ = item.chunks
+            _ = item.tags
+            session.expunge(item)
+
+        return items
