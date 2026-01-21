@@ -1,6 +1,6 @@
 [project]
 name = "uridx"
-version = "0.1.0"
+dynamic = ["version"]
 description = "uridx - Personal Reference Index"
 authors = [
     { name = "Justyn Shull" }
@@ -27,8 +27,14 @@ pdf = ["pdfplumber>=0.10"]
 line-length = 120
 
 [build-system]
-requires = ["uv_build>=0.9.22,<0.10.0"]
-build-backend = "uv_build"
+requires = ["hatchling", "uv-dynamic-versioning"]
+build-backend = "hatchling.build"
+
+[tool.hatch.version]
+source = "uv-dynamic-versioning"
+
+[tool.uv-dynamic-versioning]
+fallback-version = "0.0.0"
 
 [dependency-groups]
 dev = [
