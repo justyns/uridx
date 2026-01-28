@@ -9,6 +9,7 @@ from rich.console import Console
 from rich.progress import BarColumn, MofNCompleteColumn, Progress, SpinnerColumn, TextColumn
 
 from uridx.cli.extract import app as extract_app
+from uridx.config import get_machine_id
 from uridx.db.engine import init_db
 from uridx.db.operations import add_item, get_stats
 from uridx.search.hybrid import hybrid_search
@@ -65,6 +66,7 @@ def ingest(
                 source_uri=text,
                 chunks=[{"text": content}],
                 replace=replace,
+                machine=get_machine_id(),
             )
         print(json.dumps({"source_uri": item.source_uri, "chunks": len(item.chunks)}))
     else:
@@ -91,6 +93,7 @@ def ingest(
                     chunks=data.get("chunks", []),
                     replace=data.get("replace", replace),
                     created_at=data.get("created_at"),
+                    machine=data.get("machine") or get_machine_id(),
                 )
                 count += 1
                 progress.advance(task)

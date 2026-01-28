@@ -5,7 +5,7 @@ from fastmcp.server.auth.providers.jwt import StaticTokenVerifier
 from starlette.requests import Request
 from starlette.responses import HTMLResponse, JSONResponse, RedirectResponse
 
-from uridx.config import URIDX_AUTH_TOKEN, URIDX_BASE_URL, URIDX_OAUTH_PASSWORD
+from uridx.config import URIDX_AUTH_TOKEN, URIDX_BASE_URL, URIDX_OAUTH_PASSWORD, get_machine_id
 from uridx.db.engine import init_db
 from uridx.db.operations import (
     _get_existing_local,
@@ -256,16 +256,22 @@ def add(
     Returns:
         Confirmation with status and the source_uri
     """
-    add_item(
+    item = add_item(
         source_uri=source_uri,
         title=title,
         source_type=source_type,
         context=context,
         chunks=[{"text": text}],
         tags=tags,
+        machine=get_machine_id(),
     )
 
-    return {"status": "added", "source_uri": source_uri, "title": title}
+    return {
+        "status": "added",
+        "source_uri": source_uri,
+        "title": title,
+        "merged": item.source_uri != source_uri,
+    }
 
 
 @mcp.tool()
@@ -314,6 +320,7 @@ def get(source_uri: str) -> dict | None:
         updated_at=item.updated_at.isoformat() if item.updated_at else None,
         chunks=[{"text": c.text, "key": c.chunk_key} for c in item.chunks],
         tags=[t.tag for t in item.tags] if item.tags else None,
+        locations=[{"uri": loc.uri, "machine": loc.machine} for loc in item.locations] if item.locations else None,
     )
 
 

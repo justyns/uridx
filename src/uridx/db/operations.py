@@ -8,7 +8,7 @@ from sqlmodel import func, select
 
 from uridx.config import OLLAMA_BASE_URL, OLLAMA_EMBED_MODEL, URIDX_API_URL
 from uridx.db.engine import get_raw_connection, get_session
-from uridx.db.models import Chunk, Item, Tag
+from uridx.db.models import Chunk, Item, Location, Tag
 from uridx.embeddings.ollama import get_embeddings_sync, serialize_embedding
 
 
@@ -29,6 +29,23 @@ def _delete_chunk_embeddings(chunk_ids: list[int]) -> None:
     conn.close()
 
 
+def _ensure_location(session, item_id: int, uri: str, machine: str | None) -> None:
+    existing = session.exec(select(Location).where(Location.item_id == item_id, Location.uri == uri)).first()
+    if not existing:
+        session.add(Location(item_id=item_id, uri=uri, machine=machine))
+    elif machine and existing.machine != machine:
+        existing.machine = machine
+
+
+def _detach_item(session, item: Item) -> Item:
+    """Load relationships and detach item from session for safe return."""
+    _ = item.chunks
+    _ = item.tags
+    _ = item.locations
+    session.expunge(item)
+    return item
+
+
 def add_item(
     source_uri: str,
     title: str | None = None,
@@ -39,6 +56,7 @@ def add_item(
     expires_at: datetime | None = None,
     replace: bool = False,  # kept for API compatibility, ignored
     created_at: datetime | str | None = None,
+    machine: str | None = None,
 ) -> Item:
     chunks = chunks or []
     tags = tags or []
@@ -53,6 +71,7 @@ def add_item(
 
         if existing and existing.content_hash == new_hash:
             print(f"  Skipping {source_uri} (unchanged)", file=sys.stderr)
+            _ensure_location(session, existing.id, source_uri, machine)
             existing.title = title
             existing.source_type = source_type
             existing.context = context
@@ -68,10 +87,7 @@ def add_item(
 
             session.commit()
             session.refresh(existing)
-            _ = existing.chunks
-            _ = existing.tags
-            session.expunge(existing)
-            return existing
+            return _detach_item(session, existing)
 
         if existing:
             _delete_chunk_embeddings([c.id for c in existing.chunks])
@@ -79,8 +95,24 @@ def add_item(
                 session.delete(chunk)
             for tag in list(existing.tags):
                 session.delete(tag)
+            for loc in list(existing.locations):
+                session.delete(loc)
             session.delete(existing)
             session.commit()
+
+        # Check if content_hash matches another item (merge case)
+        hash_match = session.exec(select(Item).where(Item.content_hash == new_hash)).first()
+        if hash_match:
+            print(f"  Merging {source_uri} into {hash_match.source_uri}", file=sys.stderr)
+            _ensure_location(session, hash_match.id, source_uri, machine)
+            existing_tags = {t.tag for t in hash_match.tags}
+            for tag_name in tags:
+                if tag_name not in existing_tags:
+                    session.add(Tag(item_id=hash_match.id, tag=tag_name))
+            hash_match.updated_at = datetime.utcnow()
+            session.commit()
+            session.refresh(hash_match)
+            return _detach_item(session, hash_match)
 
         item = Item(
             source_uri=source_uri,
@@ -116,6 +148,8 @@ def add_item(
         for tag_name in tags:
             session.add(Tag(item_id=item.id, tag=tag_name))
 
+        session.add(Location(item_id=item.id, uri=source_uri, machine=machine))
+
         session.commit()
 
         if texts_to_embed:
@@ -131,10 +165,7 @@ def add_item(
             conn.close()
 
         session.refresh(item)
-        _ = item.chunks
-        _ = item.tags
-        session.expunge(item)
-        return item
+        return _detach_item(session, item)
 
 
 def delete_item(source_uri: str) -> bool:
@@ -148,6 +179,8 @@ def delete_item(source_uri: str) -> bool:
             session.delete(chunk)
         for tag in list(item.tags):
             session.delete(tag)
+        for loc in list(item.locations):
+            session.delete(loc)
         session.delete(item)
         session.commit()
         return True
@@ -157,12 +190,13 @@ def get_item(source_uri: str) -> Item | None:
     with get_session() as session:
         item = session.exec(select(Item).where(Item.source_uri == source_uri)).first()
         if not item:
+            loc = session.exec(select(Location).where(Location.uri == source_uri)).first()
+            if loc:
+                item = session.get(Item, loc.item_id)
+        if not item:
             return None
 
-        _ = item.chunks
-        _ = item.tags
-        session.expunge(item)
-        return item
+        return _detach_item(session, item)
 
 
 def get_stats() -> dict:
@@ -227,8 +261,6 @@ def list_recent(
         items = items[:limit]
 
         for item in items:
-            _ = item.chunks
-            _ = item.tags
-            session.expunge(item)
+            _detach_item(session, item)
 
         return items

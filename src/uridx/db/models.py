@@ -11,6 +11,16 @@ class Tag(SQLModel, table=True):
     item: "Item" = Relationship(back_populates="tags")
 
 
+class Location(SQLModel, table=True):
+    id: Optional[int] = Field(default=None, primary_key=True)
+    item_id: int = Field(foreign_key="item.id", index=True)
+    uri: str = Field(index=True)
+    machine: Optional[str] = Field(default=None, index=True)
+    added_at: datetime = Field(default_factory=datetime.utcnow)
+
+    item: "Item" = Relationship(back_populates="locations")
+
+
 class Chunk(SQLModel, table=True):
     id: Optional[int] = Field(default=None, primary_key=True)
     item_id: int = Field(foreign_key="item.id", index=True)
@@ -36,6 +46,7 @@ class Item(SQLModel, table=True):
 
     chunks: list[Chunk] = Relationship(back_populates="item")
     tags: list[Tag] = Relationship(back_populates="item")
+    locations: list[Location] = Relationship(back_populates="item")
 
 
 class Setting(SQLModel, table=True):

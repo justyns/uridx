@@ -128,6 +128,14 @@ def init_db():
     if "content_hash" not in columns:
         cursor.execute("ALTER TABLE item ADD COLUMN content_hash TEXT")
 
+    # Migration: populate location table for existing items without locations
+    # SQLModel creates the table, but we need to populate it for pre-existing items
+    cursor.execute("""
+        INSERT OR IGNORE INTO location (item_id, uri, added_at)
+        SELECT id, source_uri, created_at FROM item
+        WHERE id NOT IN (SELECT DISTINCT item_id FROM location)
+    """)
+
     cursor.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='chunk_embeddings'")
     if not cursor.fetchone():
         cursor.execute(
