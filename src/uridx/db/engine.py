@@ -73,6 +73,13 @@ def _ensure_fts_table(cursor):
             cursor.execute("INSERT INTO chunks_fts(rowid, text) SELECT id, text FROM chunk")
 
 
+def _set_sqlite_pragmas(dbapi_conn, connection_record):
+    cursor = dbapi_conn.cursor()
+    cursor.execute("PRAGMA journal_mode=WAL")
+    cursor.execute("PRAGMA busy_timeout=5000")
+    cursor.close()
+
+
 def get_engine():
     global _engine
     if _engine is not None:
@@ -85,6 +92,11 @@ def get_engine():
         f"sqlite:///{db_path}",
         connect_args={"check_same_thread": False},
     )
+
+    from sqlalchemy import event
+
+    event.listen(_engine, "connect", _set_sqlite_pragmas)
+
     return _engine
 
 
@@ -97,6 +109,8 @@ def _load_extensions(conn: sqlite3.Connection):
 def get_raw_connection() -> sqlite3.Connection:
     db_path = Path(URIDX_DB_PATH)
     conn = sqlite3.connect(str(db_path))
+    conn.execute("PRAGMA journal_mode=WAL")
+    conn.execute("PRAGMA busy_timeout=5000")
     _load_extensions(conn)
     return conn
 
