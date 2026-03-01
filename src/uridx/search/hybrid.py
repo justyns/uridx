@@ -3,10 +3,9 @@ from datetime import datetime, timezone
 
 from sqlmodel import select
 
-from uridx.config import OLLAMA_BASE_URL, OLLAMA_EMBED_MODEL
 from uridx.db.engine import get_raw_connection, get_session
 from uridx.db.models import Chunk, Item, Tag
-from uridx.embeddings.ollama import get_embeddings_sync, serialize_embedding
+from uridx.embeddings import get_embeddings_sync, serialize_embedding
 
 
 @dataclass
@@ -37,7 +36,7 @@ def hybrid_search(
     cursor = conn.cursor()
 
     if semantic:
-        query_embedding = get_embeddings_sync([query], OLLAMA_EMBED_MODEL, OLLAMA_BASE_URL)[0]
+        query_embedding = get_embeddings_sync([query])[0]
         embedding_blob = serialize_embedding(query_embedding)
 
         cursor.execute(

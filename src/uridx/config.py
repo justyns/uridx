@@ -8,6 +8,9 @@ URIDX_AUTH_TOKEN: str | None = os.getenv("URIDX_AUTH_TOKEN")
 URIDX_OAUTH_PASSWORD: str | None = os.getenv("URIDX_OAUTH_PASSWORD")
 URIDX_BASE_URL: str | None = os.getenv("URIDX_BASE_URL")
 
+URIDX_EMBEDDINGS = os.getenv("URIDX_EMBEDDINGS", "fastembed")  # "fastembed" or "ollama"
+FASTEMBED_MODEL = os.getenv("FASTEMBED_MODEL", "nomic-ai/nomic-embed-text-v1.5")
+
 OLLAMA_BASE_URL = os.getenv("OLLAMA_BASE_URL", "http://localhost:11434")
 OLLAMA_EMBED_MODEL = os.getenv("OLLAMA_EMBED_MODEL", "qwen3-embedding:0.6b")
 

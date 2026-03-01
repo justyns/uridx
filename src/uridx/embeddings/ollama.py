@@ -1,5 +1,3 @@
-import struct
-
 import httpx
 
 DEFAULT_TIMEOUT = 60.0
@@ -41,11 +39,3 @@ async def get_embeddings(texts: list[str], model: str, base_url: str) -> list[li
         )
         response.raise_for_status()
         return response.json()["embeddings"]
-
-
-def serialize_embedding(embedding: list[float]) -> bytes:
-    return struct.pack(f"{len(embedding)}f", *embedding)
-
-
-def deserialize_embedding(data: bytes, dim: int) -> list[float]:
-    return list(struct.unpack(f"{dim}f", data))

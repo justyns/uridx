@@ -6,10 +6,10 @@ from datetime import datetime
 import httpx
 from sqlmodel import func, select
 
-from uridx.config import OLLAMA_BASE_URL, OLLAMA_EMBED_MODEL, URIDX_API_URL
+from uridx.config import URIDX_API_URL
 from uridx.db.engine import get_raw_connection, get_session
 from uridx.db.models import Chunk, Item, Location, Tag
-from uridx.embeddings.ollama import get_embeddings_sync, serialize_embedding
+from uridx.embeddings import get_embeddings_sync, serialize_embedding
 
 
 def compute_content_hash(chunks: list[dict]) -> str:
@@ -153,7 +153,7 @@ def add_item(
         session.commit()
 
         if texts_to_embed:
-            embeddings = get_embeddings_sync(texts_to_embed, OLLAMA_EMBED_MODEL, OLLAMA_BASE_URL)
+            embeddings = get_embeddings_sync(texts_to_embed)
             conn = get_raw_connection()
             cursor = conn.cursor()
             for chunk_record, embedding in zip(chunk_records, embeddings):

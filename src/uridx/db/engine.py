@@ -4,9 +4,9 @@ from pathlib import Path
 import sqlite_vec
 from sqlmodel import Session, SQLModel, create_engine
 
-from uridx.config import OLLAMA_BASE_URL, OLLAMA_EMBED_MODEL, URIDX_DB_PATH
+from uridx.config import URIDX_DB_PATH
 from uridx.db.models import Setting
-from uridx.embeddings.ollama import get_dimension
+from uridx.embeddings import get_dimension
 
 _engine = None
 
@@ -114,8 +114,7 @@ def init_db():
         if existing:
             embed_dim = int(existing.value)
         else:
-            embed_dim = get_dimension(OLLAMA_EMBED_MODEL, OLLAMA_BASE_URL)
-            session.add(Setting(key="embed_model", value=OLLAMA_EMBED_MODEL))
+            embed_dim = get_dimension()
             session.add(Setting(key="embed_dimension", value=str(embed_dim)))
             session.commit()
 
