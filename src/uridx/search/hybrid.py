@@ -3,6 +3,7 @@ from datetime import datetime, timezone
 
 from sqlmodel import select
 
+from uridx.config import URIDX_BM25_WEIGHT, URIDX_MIN_SCORE
 from uridx.db.engine import get_raw_connection, get_session
 from uridx.db.models import Chunk, Item, Tag
 from uridx.embeddings import get_embeddings_sync, serialize_embedding
@@ -24,6 +25,18 @@ def escape_fts_query(query: str) -> str:
     return f'"{query.replace('"', '""')}"'
 
 
+def _fts_search(cursor, query: str, limit: int) -> list[tuple[int, float]]:
+    cursor.execute(
+        "SELECT rowid, bm25(chunks_fts) as score FROM chunks_fts WHERE chunks_fts MATCH ? ORDER BY score LIMIT ?",
+        (escape_fts_query(query), limit * 3),
+    )
+    results = cursor.fetchall()
+    if not results:
+        return []
+    fts_min = min(r[1] for r in results) or -1.0
+    return [(rowid, score / fts_min if fts_min != 0 else 0.0) for rowid, score in results]
+
+
 def hybrid_search(
     query: str,
     limit: int = 10,
@@ -31,7 +44,18 @@ def hybrid_search(
     tags: list[str] | None = None,
     semantic: bool = True,
     recency_boost: float = 0.3,
+    min_score: float | None = None,
+    source_prefix: str | None = None,
+    after: datetime | None = None,
+    bm25_weight: float | None = None,
 ) -> list[SearchResult]:
+    if min_score is None:
+        min_score = URIDX_MIN_SCORE
+    if bm25_weight is None:
+        bm25_weight = URIDX_BM25_WEIGHT
+    bm25_weight = max(0.0, min(1.0, bm25_weight))
+    vector_weight = 1.0 - bm25_weight
+
     conn = get_raw_connection()
     cursor = conn.cursor()
 
@@ -45,11 +69,7 @@ def hybrid_search(
         )
         vec_results = cursor.fetchall()
 
-        cursor.execute(
-            "SELECT rowid, bm25(chunks_fts) as score FROM chunks_fts WHERE chunks_fts MATCH ? ORDER BY score LIMIT ?",
-            (escape_fts_query(query), limit * 3),
-        )
-        fts_results = cursor.fetchall()
+        fts_results = _fts_search(cursor, query, limit)
 
         vec_scores = {}
         if vec_results:
@@ -57,32 +77,18 @@ def hybrid_search(
             for chunk_id, distance in vec_results:
                 vec_scores[chunk_id] = 1.0 - (distance / max_dist)
 
-        fts_scores = {}
-        if fts_results:
-            min_score = min(r[1] for r in fts_results) or -1.0
-            for rowid, score in fts_results:
-                fts_scores[rowid] = score / min_score if min_score != 0 else 0.0
+        fts_scores = dict(fts_results)
 
         all_chunk_ids = set(vec_scores.keys()) | set(fts_scores.keys())
         combined_scores = {}
         for chunk_id in all_chunk_ids:
             v_score = vec_scores.get(chunk_id, 0.0)
             f_score = fts_scores.get(chunk_id, 0.0)
-            combined_scores[chunk_id] = 0.7 * v_score + 0.3 * f_score
+            combined_scores[chunk_id] = vector_weight * v_score + bm25_weight * f_score
 
         ranked_chunks = sorted(combined_scores.items(), key=lambda x: x[1], reverse=True)
     else:
-        cursor.execute(
-            "SELECT rowid, bm25(chunks_fts) as score FROM chunks_fts WHERE chunks_fts MATCH ? ORDER BY score LIMIT ?",
-            (escape_fts_query(query), limit * 3),
-        )
-        fts_results = cursor.fetchall()
-
-        if fts_results:
-            min_score = min(r[1] for r in fts_results) or -1.0
-            ranked_chunks = [(rowid, score / min_score if min_score != 0 else 0.0) for rowid, score in fts_results]
-        else:
-            ranked_chunks = []
+        ranked_chunks = _fts_search(cursor, query, limit)
 
     conn.close()
 
@@ -97,22 +103,21 @@ def hybrid_search(
 
         if source_type:
             stmt = stmt.where(Item.source_type == source_type)
+        if source_prefix:
+            stmt = stmt.where(Item.source_uri.startswith(source_prefix))
+        if after:
+            stmt = stmt.where(Item.created_at >= after)
 
         results_data = session.exec(stmt).all()
 
-        if tags:
-            filtered_data = []
-            for chunk, item in results_data:
-                item_tags = session.exec(select(Tag).where(Tag.item_id == item.id)).all()
+        results_with_tags = []
+        for chunk, item in results_data:
+            item_tags = session.exec(select(Tag).where(Tag.item_id == item.id)).all()
+            if tags:
                 item_tag_names = {t.tag for t in item_tags}
-                if all(tag in item_tag_names for tag in tags):
-                    filtered_data.append((chunk, item, item_tags))
-            results_with_tags = filtered_data
-        else:
-            results_with_tags = []
-            for chunk, item in results_data:
-                item_tags = session.exec(select(Tag).where(Tag.item_id == item.id)).all()
-                results_with_tags.append((chunk, item, item_tags))
+                if not all(t in item_tag_names for t in tags):
+                    continue
+            results_with_tags.append((chunk, item, item_tags))
 
         results = []
         for chunk, item, item_tags in results_with_tags:
@@ -141,4 +146,6 @@ def hybrid_search(
                 r.score = r.score * (1 - recency_boost) + age_score * recency_boost
 
         results.sort(key=lambda x: x.score, reverse=True)
+        if min_score is not None:
+            results = [r for r in results if r.score >= min_score]
         return results[:limit]

@@ -25,9 +25,26 @@ def search(
     type: Annotated[Optional[str], typer.Option("--type")] = None,
     limit: Annotated[int, typer.Option("--limit", "-n")] = 10,
     json_output: Annotated[bool, typer.Option("--json", "-j")] = False,
+    semantic: Annotated[bool, typer.Option("--semantic/--no-semantic")] = True,
+    recency_boost: Annotated[float, typer.Option("--recency-boost")] = 0.3,
+    min_score: Annotated[Optional[float], typer.Option("--min-score")] = None,
+    source_prefix: Annotated[Optional[str], typer.Option("--source-prefix")] = None,
+    after: Annotated[Optional[datetime], typer.Option("--after")] = None,
+    bm25_weight: Annotated[Optional[float], typer.Option("--bm25-weight")] = None,
 ):
     init_db()
-    results = hybrid_search(query, limit=limit, source_type=type, tags=tag)
+    results = hybrid_search(
+        query,
+        limit=limit,
+        source_type=type,
+        tags=tag,
+        semantic=semantic,
+        recency_boost=recency_boost,
+        min_score=min_score,
+        source_prefix=source_prefix,
+        after=after,
+        bm25_weight=bm25_weight,
+    )
 
     if json_output:
 
