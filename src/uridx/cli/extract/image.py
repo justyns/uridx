@@ -23,6 +23,7 @@ def extract(
     model: Annotated[str, typer.Option("--model", "-m", help="Vision model")] = "",
     base_url: Annotated[str, typer.Option("--base-url", help="Ollama URL")] = "",
     force: Annotated[bool, typer.Option("--force", "-f", help="Re-process all files even if already ingested")] = False,
+    tag: Annotated[Optional[list[str]], typer.Option("--tag", "-t", help="Additional tags")] = None,
 ):
     """Extract image descriptions via Ollama vision model."""
     ollama_url = base_url or os.getenv("OLLAMA_BASE_URL", "http://localhost:11434")
@@ -81,7 +82,7 @@ def extract(
                 "chunks": [
                     {"text": description.strip(), "key": "description", "meta": {"original_filename": img_file.name}}
                 ],
-                "tags": ["image"],
+                "tags": ["image"] + (tag or []),
                 "title": img_file.stem,
                 "source_type": "image",
                 "context": json.dumps({"path": str(img_file), "vision_model": vision_model}),

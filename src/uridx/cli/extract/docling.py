@@ -36,6 +36,7 @@ SUPPORTED_EXTENSIONS = {
 def extract(
     sources: Annotated[Optional[list[str]], typer.Argument(help="Files, directories, or URLs")] = None,
     force: Annotated[bool, typer.Option("--force", "-f", help="Re-process all files even if already ingested")] = False,
+    tag: Annotated[Optional[list[str]], typer.Option("--tag", "-t", help="Additional tags")] = None,
 ):
     """Extract documents using docling (requires docling)."""
     try:
@@ -74,11 +75,14 @@ def extract(
     converter = DocumentConverter()
     chunker = HybridChunker()
 
+    extra_tags = tag or []
     for source_uri, (source, created_at) in source_uri_map.items():
-        _convert_source(converter, chunker, source, source_uri, created_at=created_at)
+        _convert_source(converter, chunker, source, source_uri, created_at=created_at, extra_tags=extra_tags)
 
 
-def _convert_source(converter, chunker, source: str, source_uri: str, created_at: str | None = None):
+def _convert_source(
+    converter, chunker, source: str, source_uri: str, created_at: str | None = None, extra_tags: list[str] = ()
+):
     """Convert a single source and output JSONL."""
     try:
         result = converter.convert(source)
@@ -108,7 +112,7 @@ def _convert_source(converter, chunker, source: str, source_uri: str, created_at
     record = {
         "source_uri": source_uri,
         "chunks": chunks,
-        "tags": ["document", ext] if ext else ["document"],
+        "tags": (["document", ext] if ext else ["document"]) + list(extra_tags),
         "title": title,
         "source_type": "document",
         "context": json.dumps({"source": source}),

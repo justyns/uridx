@@ -16,6 +16,7 @@ from .base import output
 def extract(
     path: Annotated[Optional[Path], typer.Argument(help="File or directory")] = None,
     force: Annotated[bool, typer.Option("--force", "-f", help="Re-process all files even if already ingested")] = False,
+    tag: Annotated[Optional[list[str]], typer.Option("--tag", "-t", help="Additional tags")] = None,
 ):
     """Extract PDF files by page (requires pdfplumber)."""
     try:
@@ -76,7 +77,7 @@ def extract(
             {
                 "source_uri": source_uri,
                 "chunks": chunks,
-                "tags": ["pdf", "document"],
+                "tags": ["pdf", "document"] + (tag or []),
                 "title": pdf_file.stem,
                 "source_type": "pdf",
                 "context": json.dumps({"path": str(pdf_file), "pages": len(chunks)}),

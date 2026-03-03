@@ -136,6 +136,7 @@ def _parse_conversation(jsonl_path: Path) -> dict | None:
 def extract(
     path: Annotated[Optional[Path], typer.Argument(help="Projects directory")] = None,
     force: Annotated[bool, typer.Option("--force", "-f", help="Re-process all files even if already ingested")] = False,
+    tag: Annotated[Optional[list[str]], typer.Option("--tag", "-t", help="Additional tags")] = None,
 ):
     """Extract Claude Code conversations from ~/.claude/projects/"""
     projects_dir = path or (Path.home() / ".claude" / "projects")
@@ -184,7 +185,7 @@ def extract(
             {
                 "source_uri": source_uri,
                 "chunks": result["chunks"],
-                "tags": ["claude-code", "conversation"],
+                "tags": ["claude-code", "conversation"] + (tag or []),
                 "title": result["title"],
                 "source_type": "claude-code",
                 "context": json.dumps(result["metadata"]),
