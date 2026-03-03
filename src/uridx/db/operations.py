@@ -90,14 +90,7 @@ def add_item(
             return _detach_item(session, existing)
 
         if existing:
-            _delete_chunk_embeddings([c.id for c in existing.chunks])
-            for chunk in list(existing.chunks):
-                session.delete(chunk)
-            for tag in list(existing.tags):
-                session.delete(tag)
-            for loc in list(existing.locations):
-                session.delete(loc)
-            session.delete(existing)
+            _delete_item_in_session(session, existing)
             session.commit()
 
         # Check if content_hash matches another item (merge case)
@@ -168,22 +161,42 @@ def add_item(
         return _detach_item(session, item)
 
 
+def _delete_item_in_session(session, item: Item) -> None:
+    _delete_chunk_embeddings([c.id for c in item.chunks])
+    session.delete(item)
+
+
 def delete_item(source_uri: str) -> bool:
     with get_session() as session:
         item = session.exec(select(Item).where(Item.source_uri == source_uri)).first()
         if not item:
             return False
-
-        _delete_chunk_embeddings([c.id for c in item.chunks])
-        for chunk in list(item.chunks):
-            session.delete(chunk)
-        for tag in list(item.tags):
-            session.delete(tag)
-        for loc in list(item.locations):
-            session.delete(loc)
-        session.delete(item)
+        _delete_item_in_session(session, item)
         session.commit()
         return True
+
+
+def delete_items_by_prefix(prefix: str) -> int:
+    if not prefix:
+        raise ValueError("prefix must not be empty")
+    with get_session() as session:
+        items = session.exec(select(Item).where(Item.source_uri.startswith(prefix))).all()
+        all_chunk_ids = [c.id for item in items for c in item.chunks]
+        _delete_chunk_embeddings(all_chunk_ids)
+        for item in items:
+            session.delete(item)
+        session.commit()
+        return len(items)
+
+
+def list_items_by_prefix(prefix: str) -> list[Item]:
+    if not prefix:
+        raise ValueError("prefix must not be empty")
+    with get_session() as session:
+        items = session.exec(select(Item).where(Item.source_uri.startswith(prefix))).all()
+        for item in items:
+            _detach_item(session, item)
+        return items
 
 
 def get_item(source_uri: str) -> Item | None:

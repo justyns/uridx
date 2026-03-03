@@ -44,9 +44,9 @@ class Item(SQLModel, table=True):
     created_at: datetime = Field(default_factory=datetime.utcnow)
     updated_at: datetime = Field(default_factory=datetime.utcnow)
 
-    chunks: list[Chunk] = Relationship(back_populates="item")
-    tags: list[Tag] = Relationship(back_populates="item")
-    locations: list[Location] = Relationship(back_populates="item")
+    chunks: list[Chunk] = Relationship(back_populates="item", cascade_delete=True)
+    tags: list[Tag] = Relationship(back_populates="item", cascade_delete=True)
+    locations: list[Location] = Relationship(back_populates="item", cascade_delete=True)
 
 
 class Setting(SQLModel, table=True):
