@@ -12,6 +12,7 @@ from uridx.db.operations import (
     _get_existing_local,
     add_item,
     delete_item,
+    delete_items_by_prefix,
     get_item,
     list_recent as list_recent_items,
 )
@@ -293,19 +294,28 @@ def add(
 
 
 @mcp.tool()
-def delete(source_uri: str) -> dict:
+def delete(source_uri: str | None = None, source_prefix: str | None = None) -> dict:
     """Delete an item from the uridx knowledge base.
 
     Permanently removes the item and all its indexed content.
 
     Args:
         source_uri: The unique identifier of the item to delete
+        source_prefix: Delete all items whose source_uri starts with this prefix
 
     Returns:
         Status indicating whether the item was deleted or not found
     """
-    deleted = delete_item(source_uri)
+    if not source_uri and not source_prefix:
+        return {"status": "error", "message": "Provide source_uri or source_prefix"}
+    if source_uri and source_prefix:
+        return {"status": "error", "message": "Provide only one of source_uri or source_prefix"}
 
+    if source_prefix:
+        count = delete_items_by_prefix(source_prefix)
+        return {"status": "deleted", "count": count}
+
+    deleted = delete_item(source_uri)
     return {
         "status": "deleted" if deleted else "not_found",
         "source_uri": source_uri,
