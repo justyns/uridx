@@ -3,7 +3,6 @@
 import json
 import re
 import sys
-from datetime import datetime
 from pathlib import Path
 from typing import Annotated, Optional
 
@@ -47,7 +46,7 @@ def _build_turns(messages: list[dict]) -> list[dict]:
     """Build turn chunks from a list of turn records."""
     turns = []
 
-    for turn_idx, record in enumerate(messages):
+    for record in messages:
         if record.get("type") != "turn":
             continue
 
@@ -75,11 +74,13 @@ def _build_turns(messages: list[dict]) -> list[dict]:
             text_parts.append(f"Assistant: {' '.join(assistant_parts)}")
 
         if text_parts:
-            turns.append({
-                "text": "\n\n".join(text_parts),
-                "key": f"turn-{len(turns)}",
-                "meta": {"turn_index": len(turns)},
-            })
+            turns.append(
+                {
+                    "text": "\n\n".join(text_parts),
+                    "key": f"turn-{len(turns)}",
+                    "meta": {"turn_index": len(turns)},
+                }
+            )
 
     return turns
 
@@ -88,7 +89,6 @@ def _parse_session(jsonl_path: Path) -> dict | None:
     """Parse a Tsugite session JSONL file into chunks."""
     records = []
     meta = {}
-    compaction_summary = None
 
     with open(jsonl_path, encoding="utf-8") as f:
         for line in f:
@@ -109,8 +109,6 @@ def _parse_session(jsonl_path: Path) -> dict | None:
                     "created_at": record.get("created_at"),
                     "compacted_from": record.get("compacted_from"),
                 }
-            elif rtype == "compaction_summary":
-                compaction_summary = record.get("summary", "")
             elif rtype == "turn":
                 records.append(record)
 
@@ -153,7 +151,9 @@ def _extract_date_from_filename(name: str) -> str | None:
 def extract(
     path: Annotated[Optional[Path], typer.Argument(help="History directory")] = None,
     agent: Annotated[Optional[str], typer.Option("--agent", "-a", help="Filter by agent name")] = None,
-    since: Annotated[Optional[str], typer.Option("--since", "-s", help="Only sessions after this date (YYYY-MM-DD)")] = None,
+    since: Annotated[
+        Optional[str], typer.Option("--since", "-s", help="Only sessions after this date (YYYY-MM-DD)")
+    ] = None,
     force: Annotated[bool, typer.Option("--force", "-f", help="Re-process all files")] = False,
     tag: Annotated[Optional[list[str]], typer.Option("--tag", "-t", help="Additional tags")] = None,
 ):
@@ -180,12 +180,11 @@ def extract(
             continue
 
         stem = jsonl_file.stem
+        file_agent = _extract_agent_from_filename(stem)
 
         # Fast agent filter from filename (avoids parsing the file)
-        if agent:
-            file_agent = _extract_agent_from_filename(stem)
-            if file_agent and file_agent != agent:
-                continue
+        if agent and file_agent and file_agent != agent:
+            continue
 
         # Fast date filter from filename
         if since_date:
@@ -193,15 +192,14 @@ def extract(
             if file_date and file_date < since_date:
                 continue
 
-        # Derive agent name for URI; fall back to "unknown"
-        file_agent = _extract_agent_from_filename(stem) or "unknown"
-        uri = f"tsugite://{file_agent}/{stem}"
+        uri = f"tsugite://{file_agent or 'unknown'}/{stem}"
         source_uri_map[uri] = jsonl_file
 
     # Dedup: skip already-indexed sessions
     if not force and source_uri_map:
         if not URIDX_API_URL:
             from uridx.db.engine import init_db
+
             init_db()
         existing = get_existing_source_uris(list(source_uri_map.keys()))
         for uri in existing:
@@ -232,12 +230,14 @@ def extract(
         auto_tags = [session_agent, "conversation", "tsugite"]
         all_tags = auto_tags + (tag or [])
 
-        output({
-            "source_uri": base_uri,
-            "chunks": result["chunks"],
-            "tags": all_tags,
-            "title": result["title"],
-            "source_type": "tsugite",
-            "context": json.dumps(result["metadata"]),
-            "replace": True,
-        })
+        output(
+            {
+                "source_uri": base_uri,
+                "chunks": result["chunks"],
+                "tags": all_tags,
+                "title": result["title"],
+                "source_type": "tsugite",
+                "context": json.dumps(result["metadata"]),
+                "replace": True,
+            }
+        )
