@@ -53,8 +53,7 @@ def _slugify(text: str) -> str:
     return text.strip("-")[:50] or "untitled"
 
 
-def _parse(path: Path) -> list[dict]:
-    content = path.read_text(encoding="utf-8")
+def _parse(content: str) -> list[dict]:
     heading_pattern = r"^(#{1,6}\s+.+)$"
     parts = re.split(heading_pattern, content, flags=re.MULTILINE)
 
@@ -116,7 +115,7 @@ def iter_records(files: list[Path], *, tag: Optional[list[str]] = None) -> Itera
 
     for md_file in files:
         try:
-            chunks = _parse(md_file)
+            chunks = _parse(md_file.read_text(encoding="utf-8"))
         except Exception as e:
             print(f"Error parsing {md_file}: {e}", file=sys.stderr)
             continue
@@ -139,7 +138,37 @@ def extract(
     paths: Annotated[Optional[list[Path]], typer.Argument(help="Files or directories")] = None,
     force: Annotated[bool, typer.Option("--force", "-f", help="Re-process all files even if already ingested")] = False,
     tag: Annotated[Optional[list[str]], typer.Option("--tag", "-t", help="Additional tags")] = None,
+    uri: Annotated[Optional[str], typer.Option("--uri", help="Read one document from stdin as this source URI")] = None,
+    title: Annotated[Optional[str], typer.Option("--title", help="Title for stdin input")] = None,
 ):
     """Extract markdown files, splitting by headings."""
-    for rec in iter_records(prepare_files(paths or [], EXTENSIONS, force), tag=tag):
-        output(rec)
+    if uri is None:
+        if title:
+            print("Error: --title needs --uri.", file=sys.stderr)
+            raise typer.Exit(2)
+        for rec in iter_records(prepare_files(paths or [], EXTENSIONS, force), tag=tag):
+            output(rec)
+        return
+
+    if paths:
+        print("Error: --uri reads stdin; drop the paths.", file=sys.stderr)
+        raise typer.Exit(2)
+    if sys.stdin.isatty():
+        print("Error: --uri reads markdown from stdin, but nothing was piped in.", file=sys.stderr)
+        raise typer.Exit(2)
+    chunks = _parse(sys.stdin.read())
+    if not chunks:
+        print(f"Error: stdin was empty; nothing to extract for {uri}.", file=sys.stderr)
+        raise typer.Exit(2)
+
+    from uridx.record import Record
+
+    output(
+        Record(
+            source_uri=uri,
+            chunks=chunks,
+            tags=["markdown", "document"] + (tag or []),
+            title=title,
+            source_type="markdown",
+        )
+    )
