@@ -3,10 +3,6 @@ import socket
 from pathlib import Path
 
 URIDX_DB_PATH = Path(os.getenv("URIDX_DB_PATH", Path.home() / ".local/share/uridx/uridx.db"))
-URIDX_API_URL: str | None = os.getenv("URIDX_API_URL")
-URIDX_AUTH_TOKEN: str | None = os.getenv("URIDX_AUTH_TOKEN")
-URIDX_OAUTH_PASSWORD: str | None = os.getenv("URIDX_OAUTH_PASSWORD")
-URIDX_BASE_URL: str | None = os.getenv("URIDX_BASE_URL")
 
 URIDX_EMBEDDINGS = os.getenv("URIDX_EMBEDDINGS", "fastembed")  # "fastembed" or "ollama"
 FASTEMBED_MODEL = os.getenv("FASTEMBED_MODEL", "nomic-ai/nomic-embed-text-v1.5")

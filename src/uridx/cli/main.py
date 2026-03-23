@@ -172,16 +172,5 @@ def stats():
     print(json.dumps(get_stats(), indent=2))
 
 
-@app.command()
-def serve(
-    http: Annotated[bool, typer.Option("--http", help="Run as HTTP server")] = False,
-    host: Annotated[str, typer.Option("--host", "-H", help="HTTP server host")] = "127.0.0.1",
-    port: Annotated[int, typer.Option("--port", "-p", help="HTTP server port")] = 8000,
-):
-    from uridx.mcp.server import run_server
-
-    run_server(http=http, host=host, port=port)
-
-
 if __name__ == "__main__":
     app()

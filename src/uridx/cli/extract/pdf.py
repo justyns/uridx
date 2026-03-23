@@ -7,7 +7,6 @@ from typing import Annotated, Optional
 
 import typer
 
-from uridx.config import URIDX_API_URL
 from uridx.db.operations import get_existing_source_uris
 
 from .base import output
@@ -42,10 +41,9 @@ def extract(
 
     # Check which already exist (unless --force)
     if not force and source_uri_map:
-        if not URIDX_API_URL:
-            from uridx.db.engine import init_db
+        from uridx.db.engine import init_db
 
-            init_db()
+        init_db()
         existing = get_existing_source_uris(list(source_uri_map.keys()))
         for uri in existing:
             print(f"Skipping {source_uri_map[uri]} (already ingested)", file=sys.stderr)

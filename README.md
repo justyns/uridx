@@ -1,6 +1,6 @@
 # uridx
 
-Personal semantic search index with MCP interface. Index your notes, chats, code, and documents for unified search.
+Personal semantic search index CLI. Index your notes, chats, code, and documents for unified search.
 
 ## Installation
 
@@ -94,16 +94,6 @@ uridx delete --source-prefix "file:///home/user/scratch/"
 uridx stats
 ```
 
-### MCP Server
-
-```bash
-# stdio mode (for MCP clients like Claude Desktop)
-uridx serve
-
-# HTTP mode (for remote API access)
-uridx serve --http --port 8000
-```
-
 ## Configuration
 
 Environment variables:
@@ -111,7 +101,6 @@ Environment variables:
 | Variable | Default | Description |
 |----------|---------|-------------|
 | `URIDX_DB_PATH` | `~/.local/share/uridx/uridx.db` | SQLite database path |
-| `URIDX_API_URL` | (none) | Remote uridx server URL for extractors |
 | `OLLAMA_BASE_URL` | `http://localhost:11434` | Ollama API URL |
 | `OLLAMA_EMBED_MODEL` | `qwen3-embedding:0.6b` | Embedding model |
 | `URIDX_MIN_SCORE` | (none) | Global minimum score threshold for search results |
@@ -119,5 +108,5 @@ Environment variables:
 
 Example with remote Ollama:
 ```bash
-OLLAMA_BASE_URL=http://my-server:11434 uridx serve
+OLLAMA_BASE_URL=http://my-server:11434 uridx search "test"
 ```

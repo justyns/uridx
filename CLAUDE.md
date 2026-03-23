@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project Overview
 
-uridx is a personal semantic search index with an MCP (Model Context Protocol) interface. It indexes notes, chats, code, and documents for unified hybrid search combining vector similarity (via Ollama embeddings) and BM25 full-text search.
+uridx is a personal semantic search index CLI tool. It indexes notes, chats, code, and documents for unified hybrid search combining vector similarity and BM25 full-text search.
 
 ## Commands
 
@@ -13,15 +13,13 @@ uv sync                              # Install dependencies
 uv run ruff check src/               # Lint
 uv run ruff format src/              # Format
 uv run uridx --help                  # CLI help
-uv run uridx serve                   # Start MCP server
 ```
 
 ## Architecture
 
-**Data Flow**: CLI/MCP → operations.py → SQLite + sqlite-vec + FTS5
+**Data Flow**: CLI → operations.py → SQLite + sqlite-vec + FTS5
 
-- **CLI** (`cli/main.py`): Typer app with `ingest`, `search`, `stats`, `serve` commands
-- **MCP Server** (`mcp/server.py`): FastMCP server exposing `search`, `add`, `delete`, `get` tools
+- **CLI** (`cli/main.py`): Typer app with `ingest`, `search`, `stats`, `delete` commands
 - **Search** (`search/hybrid.py`): Combines vector search (70% weight) with BM25 (30% weight) via `SearchResult` dataclass
 - **Database** (`db/`):
   - `models.py`: SQLModel tables - Item, Chunk, Tag, Setting
