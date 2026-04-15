@@ -2960,7 +2960,7 @@ wheels = [
 
 [[package]]
 name = "uridx"
-version = "0.3.0.post2.dev0+f3d9ea4"
+version = "0.3.0.post7.dev0+94ff3c9"
 source = { editable = "." }
 dependencies = [
     { name = "fastembed" },
