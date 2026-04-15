@@ -148,7 +148,7 @@ def process_query(query: str, use_spacy: bool = True) -> QueryTerms:
         QueryTerms with keywords, phrases, and a ready-to-use FTS5 query.
     """
     if not query or not query.strip():
-        return QueryTerms(original=query)
+        return QueryTerms(original=query, fts_query="")
 
     if use_spacy:
         keywords, phrases = _extract_spacy(query)

@@ -29,6 +29,8 @@ def escape_fts_query(query: str) -> str:
 def _fts_search(cursor, query: str, limit: int) -> list[tuple[int, float]]:
     """Search FTS5 index using extracted keywords from the query."""
     terms = process_query(query)
+    if not terms.fts_query:
+        return []
     cursor.execute(
         "SELECT rowid, bm25(chunks_fts) as score FROM chunks_fts WHERE chunks_fts MATCH ? ORDER BY score LIMIT ?",
         (terms.fts_query, limit * 3),
