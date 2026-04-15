@@ -37,7 +37,6 @@ def search(
     min_score: Annotated[Optional[float], typer.Option("--min-score")] = None,
     source_prefix: Annotated[Optional[str], typer.Option("--source-prefix")] = None,
     after: Annotated[Optional[datetime], typer.Option("--after")] = None,
-    bm25_weight: Annotated[Optional[float], typer.Option("--bm25-weight")] = None,
 ):
     init_db()
     results = hybrid_search(
@@ -50,7 +49,6 @@ def search(
         min_score=min_score,
         source_prefix=source_prefix,
         after=after,
-        bm25_weight=bm25_weight,
     )
 
     if json_output:
