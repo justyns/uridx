@@ -15,7 +15,6 @@ OLLAMA_BASE_URL = os.getenv("OLLAMA_BASE_URL", "http://localhost:11434")
 OLLAMA_EMBED_MODEL = os.getenv("OLLAMA_EMBED_MODEL", "qwen3-embedding:0.6b")
 
 URIDX_MIN_SCORE: float | None = float(v) if (v := os.getenv("URIDX_MIN_SCORE")) else None
-URIDX_BM25_WEIGHT: float = float(os.getenv("URIDX_BM25_WEIGHT", "0.3"))
 
 
 def get_machine_id() -> str:

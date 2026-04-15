@@ -22,7 +22,6 @@ uridx = "uridx.cli.main:app"
 [project.optional-dependencies]
 dev = ["ruff"]
 docling = ["docling>=2.66"]
-nlp = ["spacy>=3.7"]
 pdf = ["pdfplumber>=0.10"]
 
 [tool.ruff]

@@ -194,7 +194,6 @@ def search(
     min_score: float | None = None,
     source_prefix: str | None = None,
     after: str | None = None,
-    bm25_weight: float | None = None,
 ) -> list[dict]:
     """Search the uridx knowledge base for relevant content.
 
@@ -212,7 +211,6 @@ def search(
         min_score: Minimum score threshold (0.0-1.0) to filter low-quality results
         source_prefix: Filter to items whose source_uri starts with this prefix
         after: Only return items created after this ISO date (e.g., "2026-03-01")
-        bm25_weight: BM25 weight (0.0-1.0, default 0.3). Vector weight = 1 - bm25_weight.
 
     Returns:
         List of matching items with source_uri, title, source_type, snippet, score, and tags
@@ -232,7 +230,6 @@ def search(
         min_score=min_score,
         source_prefix=source_prefix,
         after=after_dt,
-        bm25_weight=bm25_weight,
     )
 
     return [

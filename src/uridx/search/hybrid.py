@@ -21,29 +21,11 @@ class SearchResult:
     created_at: datetime | None = None
 
 
-def escape_fts_query(query: str) -> str:
-    """Escape a query string for FTS5 by treating it as a phrase search."""
-    return f'"{query.replace('"', '""')}"'
-
-
-def _fts_search(cursor, query: str, limit: int) -> list[tuple[int, float]]:
-    """Search FTS5 index using extracted keywords from the query."""
-    terms = process_query(query)
-    if not terms.fts_query:
-        return []
-    cursor.execute(
-        "SELECT rowid, bm25(chunks_fts) as score FROM chunks_fts WHERE chunks_fts MATCH ? ORDER BY score LIMIT ?",
-        (terms.fts_query, limit * 3),
-    )
-    return cursor.fetchall()
-
-
 def _rrf(result_lists: list[list[tuple[int, float]]], k: int = 60) -> list[tuple[int, float]]:
-    """Combine multiple ranked result lists using Reciprocal Rank Fusion.
+    """Combine ranked result lists using Reciprocal Rank Fusion.
 
-    Each input list is [(doc_id, score)] where lower score = better for vector
-    distance and more-negative = better for BM25. Results are sorted by their
-    original score before ranking.
+    Each input list is [(doc_id, score)] ordered by the source ranker.
+    Returns [(doc_id, normalized_score)] sorted by fused score descending.
     """
     fused: dict[int, float] = {}
     for results in result_lists:
@@ -51,7 +33,6 @@ def _rrf(result_lists: list[list[tuple[int, float]]], k: int = 60) -> list[tuple
             fused[doc_id] = fused.get(doc_id, 0.0) + 1.0 / (k + rank)
     if not fused:
         return []
-    # Normalize to 0-1 range
     max_score = max(fused.values())
     if max_score > 0:
         fused = {doc_id: score / max_score for doc_id, score in fused.items()}
@@ -68,13 +49,14 @@ def hybrid_search(
     min_score: float | None = None,
     source_prefix: str | None = None,
     after: datetime | None = None,
-    bm25_weight: float | None = None,  # kept for API compat, not used with RRF
 ) -> list[SearchResult]:
     if min_score is None:
         min_score = URIDX_MIN_SCORE
 
     conn = get_raw_connection()
     cursor = conn.cursor()
+
+    fts_query = process_query(query)
 
     if semantic:
         query_embedding = get_embeddings_sync([query])[0]
@@ -86,12 +68,25 @@ def hybrid_search(
         )
         vec_results = cursor.fetchall()
 
-        fts_results = _fts_search(cursor, query, limit)
+        if fts_query:
+            cursor.execute(
+                "SELECT rowid, bm25(chunks_fts) as score FROM chunks_fts WHERE chunks_fts MATCH ? ORDER BY score LIMIT ?",
+                (fts_query, limit * 3),
+            )
+            fts_results = cursor.fetchall()
+        else:
+            fts_results = []
 
         ranked_chunks = _rrf([vec_results, fts_results])
     else:
-        fts_results = _fts_search(cursor, query, limit)
-        ranked_chunks = _rrf([fts_results])
+        if fts_query:
+            cursor.execute(
+                "SELECT rowid, bm25(chunks_fts) as score FROM chunks_fts WHERE chunks_fts MATCH ? ORDER BY score LIMIT ?",
+                (fts_query, limit * 3),
+            )
+            ranked_chunks = cursor.fetchall()
+        else:
+            ranked_chunks = []
 
     conn.close()
 
