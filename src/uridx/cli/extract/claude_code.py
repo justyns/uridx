@@ -7,9 +7,7 @@ from typing import Annotated, Optional
 
 import typer
 
-from uridx.db.operations import get_existing_source_uris
-
-from .base import output
+from .base import filter_existing, output
 
 
 def _extract_content(message: dict) -> str:
@@ -40,7 +38,21 @@ def _build_turns(messages: list[dict]) -> list[dict]:
     turns = []
     current_user = None
     current_assistant = []
-    turn_index = 0
+
+    def _emit():
+        text_parts = []
+        if current_user:
+            text_parts.append(f"User: {current_user}")
+        if current_assistant:
+            text_parts.append(f"Assistant: {' '.join(current_assistant)}")
+        if text_parts:
+            turns.append(
+                {
+                    "text": "\n\n".join(text_parts),
+                    "key": f"turn-{len(turns)}",
+                    "meta": {"turn_index": len(turns)},
+                }
+            )
 
     for msg in messages:
         msg_type = msg.get("type")
@@ -53,39 +65,14 @@ def _build_turns(messages: list[dict]) -> list[dict]:
 
         if msg_type == "user" and not _is_tool_result(msg):
             if current_user or current_assistant:
-                text_parts = []
-                if current_user:
-                    text_parts.append(f"User: {current_user}")
-                if current_assistant:
-                    text_parts.append(f"Assistant: {' '.join(current_assistant)}")
-                if text_parts:
-                    turns.append(
-                        {
-                            "text": "\n\n".join(text_parts),
-                            "key": f"turn-{turn_index}",
-                            "meta": {"turn_index": turn_index},
-                        }
-                    )
-                    turn_index += 1
+                _emit()
             current_user = content
             current_assistant = []
         elif msg_type == "assistant":
             current_assistant.append(content)
 
     if current_user or current_assistant:
-        text_parts = []
-        if current_user:
-            text_parts.append(f"User: {current_user}")
-        if current_assistant:
-            text_parts.append(f"Assistant: {' '.join(current_assistant)}")
-        if text_parts:
-            turns.append(
-                {
-                    "text": "\n\n".join(text_parts),
-                    "key": f"turn-{turn_index}",
-                    "meta": {"turn_index": turn_index},
-                }
-            )
+        _emit()
 
     return turns
 
@@ -156,16 +143,7 @@ def extract(
             uri = f"claude-code://{project_hash}/{jsonl_file.stem}"
             source_uri_map[uri] = (jsonl_file, project_hash)
 
-    # Check which already exist (unless --force)
-    if not force and source_uri_map:
-        from uridx.db.engine import init_db
-
-        init_db()
-        existing = get_existing_source_uris(list(source_uri_map.keys()))
-        for uri in existing:
-            print(f"Skipping {source_uri_map[uri][0]} (already ingested)", file=sys.stderr)
-            del source_uri_map[uri]
-
+    filter_existing(source_uri_map, force, label=lambda v: v[0])
     if not source_uri_map:
         return
 

@@ -10,9 +10,7 @@ from typing import Annotated, Optional
 import httpx
 import typer
 
-from uridx.db.operations import get_existing_source_uris
-
-from .base import get_file_mtime, output, resolve_paths
+from .base import filter_existing, get_file_mtime, output, resolve_paths
 
 EXTENSIONS = {".jpg", ".jpeg", ".png", ".gif", ".webp", ".bmp"}
 
@@ -34,16 +32,7 @@ def extract(
         uri = f"file://{img_file.resolve()}"
         source_uri_map[uri] = img_file
 
-    # Check which already exist (unless --force)
-    if not force and source_uri_map:
-        from uridx.db.engine import init_db
-
-        init_db()
-        existing = get_existing_source_uris(list(source_uri_map.keys()))
-        for uri in existing:
-            print(f"Skipping {source_uri_map[uri]} (already ingested)", file=sys.stderr)
-            del source_uri_map[uri]
-
+    filter_existing(source_uri_map, force)
     if not source_uri_map:
         return
 

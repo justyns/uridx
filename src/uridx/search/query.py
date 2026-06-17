@@ -34,11 +34,11 @@ _WORD_RE = re.compile(r"[a-zA-Z0-9_]+(?:'[a-zA-Z]+)?")
 
 def process_query(query: str) -> str:
     """Extract keywords from a query and return an FTS5 MATCH expression."""
-    if not query or not query.strip():
+    if not query.strip():
         return ""
 
-    tokens = _WORD_RE.findall(query)
-    keywords = list(dict.fromkeys(t.lower() for t in tokens if t.lower() not in STOP_WORDS and len(t) >= 2))
+    words = (t.lower() for t in _WORD_RE.findall(query))
+    keywords = list(dict.fromkeys(w for w in words if w not in STOP_WORDS and len(w) >= 2))
 
     if keywords:
         return " OR ".join(keywords)

@@ -8,9 +8,7 @@ from typing import Annotated, Optional
 
 import typer
 
-from uridx.db.operations import get_existing_source_uris
-
-from .base import output
+from .base import filter_existing, output
 
 # Patterns for system/tool content to skip in user messages
 _SKIP_PATTERNS = (
@@ -194,16 +192,7 @@ def extract(
         uri = f"tsugite://{file_agent or 'unknown'}/{stem}"
         source_uri_map[uri] = jsonl_file
 
-    # Dedup: skip already-indexed sessions
-    if not force and source_uri_map:
-        from uridx.db.engine import init_db
-
-        init_db()
-        existing = get_existing_source_uris(list(source_uri_map.keys()))
-        for uri in existing:
-            print(f"Skipping {source_uri_map[uri].name} (already ingested)", file=sys.stderr)
-            del source_uri_map[uri]
-
+    filter_existing(source_uri_map, force, label=lambda v: v.name)
     if not source_uri_map:
         return
 

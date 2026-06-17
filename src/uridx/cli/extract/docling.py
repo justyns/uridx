@@ -8,9 +8,7 @@ from urllib.parse import urlparse
 
 import typer
 
-from uridx.db.operations import get_existing_source_uris
-
-from .base import get_file_mtime, output, resolve_paths
+from .base import filter_existing, get_file_mtime, output, resolve_paths
 
 SUPPORTED_EXTENSIONS = {
     ".pdf",
@@ -57,16 +55,7 @@ def extract(
         uri = f"file://{file_path.resolve()}"
         source_uri_map[uri] = (str(file_path), get_file_mtime(file_path))
 
-    # Check which already exist (unless --force)
-    if not force and source_uri_map:
-        from uridx.db.engine import init_db
-
-        init_db()
-        existing = get_existing_source_uris(list(source_uri_map.keys()))
-        for uri in existing:
-            print(f"Skipping {source_uri_map[uri][0]} (already ingested)", file=sys.stderr)
-            del source_uri_map[uri]
-
+    filter_existing(source_uri_map, force, label=lambda v: v[0])
     if not source_uri_map:
         return
 
@@ -110,7 +99,7 @@ def _convert_source(
     record = {
         "source_uri": source_uri,
         "chunks": chunks,
-        "tags": (["document", ext] if ext else ["document"]) + list(extra_tags),
+        "tags": ["document", *([ext] if ext else []), *extra_tags],
         "title": title,
         "source_type": "document",
         "context": json.dumps({"source": source}),

@@ -250,14 +250,14 @@ def list_recent(
 
         if source_type:
             query = query.where(Item.source_type == source_type)
+        if not tags:
+            query = query.limit(limit)
 
         items = session.exec(query).all()
 
         if tags:
             tag_set = set(tags)
-            items = [i for i in items if tag_set <= {t.tag for t in i.tags}]
-
-        items = items[:limit]
+            items = [i for i in items if tag_set <= {t.tag for t in i.tags}][:limit]
 
         for item in items:
             _detach_item(session, item)

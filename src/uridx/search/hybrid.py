@@ -34,9 +34,18 @@ def _rrf(result_lists: list[list[tuple[int, float]]], k: int = 60) -> list[tuple
     if not fused:
         return []
     max_score = max(fused.values())
-    if max_score > 0:
-        fused = {doc_id: score / max_score for doc_id, score in fused.items()}
+    fused = {doc_id: score / max_score for doc_id, score in fused.items()}
     return sorted(fused.items(), key=lambda x: x[1], reverse=True)
+
+
+def _fts_search(cursor, fts_query: str, limit: int) -> list[tuple[int, float]]:
+    if not fts_query:
+        return []
+    cursor.execute(
+        "SELECT rowid, bm25(chunks_fts) as score FROM chunks_fts WHERE chunks_fts MATCH ? ORDER BY score LIMIT ?",
+        (fts_query, limit * 3),
+    )
+    return cursor.fetchall()
 
 
 def hybrid_search(
@@ -68,25 +77,10 @@ def hybrid_search(
         )
         vec_results = cursor.fetchall()
 
-        if fts_query:
-            cursor.execute(
-                "SELECT rowid, bm25(chunks_fts) as score FROM chunks_fts WHERE chunks_fts MATCH ? ORDER BY score LIMIT ?",
-                (fts_query, limit * 3),
-            )
-            fts_results = cursor.fetchall()
-        else:
-            fts_results = []
-
+        fts_results = _fts_search(cursor, fts_query, limit)
         ranked_chunks = _rrf([vec_results, fts_results])
     else:
-        if fts_query:
-            cursor.execute(
-                "SELECT rowid, bm25(chunks_fts) as score FROM chunks_fts WHERE chunks_fts MATCH ? ORDER BY score LIMIT ?",
-                (fts_query, limit * 3),
-            )
-            ranked_chunks = cursor.fetchall()
-        else:
-            ranked_chunks = []
+        ranked_chunks = _fts_search(cursor, fts_query, limit)
 
     conn.close()
 
@@ -108,17 +102,16 @@ def hybrid_search(
 
         results_data = session.exec(stmt).all()
 
-        results_with_tags = []
-        for chunk, item in results_data:
-            item_tags = session.exec(select(Tag).where(Tag.item_id == item.id)).all()
-            if tags:
-                item_tag_names = {t.tag for t in item_tags}
-                if not all(t in item_tag_names for t in tags):
-                    continue
-            results_with_tags.append((chunk, item, item_tags))
+        item_ids = {item.id for _, item in results_data}
+        tags_by_item: dict[int, list[str]] = {}
+        for t in session.exec(select(Tag).where(Tag.item_id.in_(item_ids))).all():
+            tags_by_item.setdefault(t.item_id, []).append(t.tag)
 
         results = []
-        for chunk, item, item_tags in results_with_tags:
+        for chunk, item in results_data:
+            item_tags = tags_by_item.get(item.id, [])
+            if tags and not all(t in item_tags for t in tags):
+                continue
             results.append(
                 SearchResult(
                     source_uri=item.source_uri,
@@ -126,7 +119,7 @@ def hybrid_search(
                     source_type=item.source_type,
                     chunk_text=chunk.text,
                     score=score_map.get(chunk.id, 0.0),
-                    tags=[t.tag for t in item_tags],
+                    tags=item_tags,
                     created_at=item.created_at,
                 )
             )

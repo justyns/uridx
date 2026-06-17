@@ -8,37 +8,29 @@ from uridx.config import (
 )
 
 
-def get_dimension() -> int:
+def _backend():
     if URIDX_EMBEDDINGS == "ollama":
-        from uridx.embeddings.ollama import get_dimension as _get_dimension
+        from uridx.embeddings import ollama
 
-        return _get_dimension(OLLAMA_EMBED_MODEL, OLLAMA_BASE_URL)
-    else:
-        from uridx.embeddings.fastembed import get_dimension as _get_dimension
+        return ollama, (OLLAMA_EMBED_MODEL, OLLAMA_BASE_URL)
+    from uridx.embeddings import fastembed
 
-        return _get_dimension(FASTEMBED_MODEL)
+    return fastembed, (FASTEMBED_MODEL,)
+
+
+def get_dimension() -> int:
+    mod, args = _backend()
+    return mod.get_dimension(*args)
 
 
 def get_embeddings_sync(texts: list[str]) -> list[list[float]]:
-    if URIDX_EMBEDDINGS == "ollama":
-        from uridx.embeddings.ollama import get_embeddings_sync as _get_embeddings
-
-        return _get_embeddings(texts, OLLAMA_EMBED_MODEL, OLLAMA_BASE_URL)
-    else:
-        from uridx.embeddings.fastembed import get_embeddings_sync as _get_embeddings
-
-        return _get_embeddings(texts, FASTEMBED_MODEL)
+    mod, args = _backend()
+    return mod.get_embeddings_sync(texts, *args)
 
 
 async def get_embeddings(texts: list[str]) -> list[list[float]]:
-    if URIDX_EMBEDDINGS == "ollama":
-        from uridx.embeddings.ollama import get_embeddings as _get_embeddings
-
-        return await _get_embeddings(texts, OLLAMA_EMBED_MODEL, OLLAMA_BASE_URL)
-    else:
-        from uridx.embeddings.fastembed import get_embeddings as _get_embeddings
-
-        return await _get_embeddings(texts, FASTEMBED_MODEL)
+    mod, args = _backend()
+    return await mod.get_embeddings(texts, *args)
 
 
 def serialize_embedding(embedding: list[float]) -> bytes:
