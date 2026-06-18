@@ -237,29 +237,3 @@ def get_existing_source_uris(uris: list[str]) -> set[str]:
     with get_session() as session:
         existing = session.exec(select(Item.source_uri).where(Item.source_uri.in_(uris))).all()
         return set(existing)
-
-
-def list_recent(
-    limit: int = 10,
-    source_type: str | None = None,
-    tags: list[str] | None = None,
-) -> list[Item]:
-    """List items sorted by updated_at (most recent first)."""
-    with get_session() as session:
-        query = select(Item).order_by(Item.updated_at.desc())
-
-        if source_type:
-            query = query.where(Item.source_type == source_type)
-        if not tags:
-            query = query.limit(limit)
-
-        items = session.exec(query).all()
-
-        if tags:
-            tag_set = set(tags)
-            items = [i for i in items if tag_set <= {t.tag for t in i.tags}][:limit]
-
-        for item in items:
-            _detach_item(session, item)
-
-        return items

@@ -65,9 +65,6 @@ uridx search "test" --source-prefix "memory://"
 # Only results created after a date
 uridx search "test" --after 2026-03-01
 
-# Adjust hybrid weights (higher = more keyword, lower = more semantic)
-uridx search "test" --bm25-weight 0.7
-
 # BM25-only (no semantic/vector search)
 uridx search "test" --no-semantic
 
@@ -104,7 +101,6 @@ Environment variables:
 | `OLLAMA_BASE_URL` | `http://localhost:11434` | Ollama API URL |
 | `OLLAMA_EMBED_MODEL` | `qwen3-embedding:0.6b` | Embedding model |
 | `URIDX_MIN_SCORE` | (none) | Global minimum score threshold for search results |
-| `URIDX_BM25_WEIGHT` | `0.3` | Default BM25 weight in hybrid search (vector weight = 1 - this) |
 
 Example with remote Ollama:
 ```bash
