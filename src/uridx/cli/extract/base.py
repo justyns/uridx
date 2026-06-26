@@ -1,9 +1,10 @@
 """Shared utilities for extractors."""
 
-import json
 import sys
 from datetime import datetime, timezone
 from pathlib import Path
+
+from uridx.record import Record
 
 
 class MissingExtractorDependency(Exception):
@@ -26,9 +27,9 @@ def get_file_mtime(path: Path) -> str:
     return datetime.fromtimestamp(mtime, tz=timezone.utc).isoformat()
 
 
-def output(record: dict) -> None:
-    """Output a single JSONL record to stdout."""
-    print(json.dumps(record))
+def output(record: Record) -> None:
+    """Print a record as one JSONL line (omitting unset/None fields)."""
+    print(record.model_dump_json(exclude_none=True))
 
 
 def resolve_paths(paths: list[Path], extensions: set[str]) -> list[Path]:

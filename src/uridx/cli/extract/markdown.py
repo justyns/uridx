@@ -9,6 +9,8 @@ from typing import Annotated, Optional
 
 import typer
 
+from uridx.record import Record
+
 from .base import file_uri, get_file_mtime, output, prepare_files
 
 EXTENSIONS = {".md", ".markdown"}
@@ -107,7 +109,7 @@ def _parse(path: Path) -> list[dict]:
     return _merge_small_chunks(chunks)
 
 
-def iter_records(files: list[Path], *, tag: Optional[list[str]] = None) -> Iterator[dict]:
+def iter_records(files: list[Path], *, tag: Optional[list[str]] = None) -> Iterator[Record]:
     """Yield ingest records for markdown files, splitting by headings."""
     for md_file in files:
         try:
@@ -119,16 +121,15 @@ def iter_records(files: list[Path], *, tag: Optional[list[str]] = None) -> Itera
         if not chunks:
             continue
 
-        yield {
-            "source_uri": file_uri(md_file),
-            "chunks": chunks,
-            "tags": ["markdown", "document"] + (tag or []),
-            "title": md_file.stem,
-            "source_type": "markdown",
-            "context": json.dumps({"path": str(md_file)}),
-            "replace": True,
-            "created_at": get_file_mtime(md_file),
-        }
+        yield Record(
+            source_uri=file_uri(md_file),
+            chunks=chunks,
+            tags=["markdown", "document"] + (tag or []),
+            title=md_file.stem,
+            source_type="markdown",
+            context=json.dumps({"path": str(md_file)}),
+            created_at=get_file_mtime(md_file),
+        )
 
 
 def extract(

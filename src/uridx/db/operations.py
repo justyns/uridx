@@ -9,11 +9,12 @@ from uridx.config import get_machine_id
 from uridx.db.engine import get_raw_connection, get_session
 from uridx.db.models import Chunk, Item, Location, Tag
 from uridx.embeddings import get_embeddings_sync, serialize_embedding
+from uridx.record import ChunkInput, Record
 
 
-def compute_content_hash(chunks: list[dict]) -> str:
+def compute_content_hash(chunks: list[ChunkInput]) -> str:
     """Compute SHA256 hash of chunk texts for change detection."""
-    content = "\n".join(c.get("text", "") for c in chunks)
+    content = "\n".join(c.text for c in chunks)
     return hashlib.sha256(content.encode()).hexdigest()[:32]
 
 
@@ -50,10 +51,9 @@ def add_item(
     title: str | None = None,
     source_type: str | None = None,
     context: str | None = None,
-    chunks: list[dict] | None = None,
+    chunks: list[ChunkInput] | None = None,
     tags: list[str] | None = None,
     expires_at: datetime | None = None,
-    replace: bool = False,  # kept for API compatibility, ignored
     created_at: datetime | str | None = None,
     machine: str | None = None,
 ) -> Item:
@@ -123,17 +123,16 @@ def add_item(
         texts_to_embed = []
 
         for idx, chunk_data in enumerate(chunks):
-            text = chunk_data["text"]
             chunk_record = Chunk(
                 item_id=item.id,
-                chunk_key=chunk_data.get("key"),
+                chunk_key=chunk_data.key,
                 chunk_index=idx,
-                text=text,
-                meta=json.dumps(chunk_data.get("meta")) if chunk_data.get("meta") else None,
+                text=chunk_data.text,
+                meta=json.dumps(chunk_data.meta) if chunk_data.meta else None,
             )
             session.add(chunk_record)
             chunk_records.append(chunk_record)
-            texts_to_embed.append(text)
+            texts_to_embed.append(chunk_data.text)
 
         session.flush()
 
@@ -161,28 +160,26 @@ def add_item(
 
 
 def ingest_record(
-    data: dict,
+    record: Record,
     *,
     extra_tags: list[str] | None = None,
-    default_replace: bool = False,
     default_machine: str | None = None,
 ) -> Item:
-    """Ingest one record dict (the JSONL shape extractors emit) via add_item.
+    """Ingest one Record (the contract extractors emit) via add_item.
 
     Shared by the `ingest` and `add` CLI commands. Does NOT init the DB — the
     caller must call init_db() once before looping.
     """
-    tags = ((data.get("tags") or []) + (extra_tags or [])) or None  # add_item dedups
-    machine = data.get("machine") or default_machine or get_machine_id()
+    tags = (record.tags + (extra_tags or [])) or None  # add_item dedups
+    machine = record.machine or default_machine or get_machine_id()
     return add_item(
-        source_uri=data["source_uri"],
-        title=data.get("title"),
-        context=data.get("context"),
-        source_type=data.get("source_type"),
+        source_uri=record.source_uri,
+        title=record.title,
+        context=record.context,
+        source_type=record.source_type,
         tags=tags,
-        chunks=data.get("chunks", []),
-        replace=data.get("replace", default_replace),
-        created_at=data.get("created_at"),
+        chunks=record.chunks,
+        created_at=record.created_at,
         machine=machine,
     )
 

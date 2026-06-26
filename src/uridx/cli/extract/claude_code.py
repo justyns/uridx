@@ -7,6 +7,8 @@ from typing import Annotated, Optional
 
 import typer
 
+from uridx.record import Record
+
 from .base import filter_existing, output
 
 
@@ -158,13 +160,12 @@ def extract(
             continue
 
         output(
-            {
-                "source_uri": source_uri,
-                "chunks": result["chunks"],
-                "tags": ["claude-code", "conversation"] + (tag or []),
-                "title": result["title"],
-                "source_type": "claude-code",
-                "context": json.dumps(result["metadata"]),
-                "replace": True,
-            }
+            Record(
+                source_uri=source_uri,
+                chunks=result["chunks"],
+                tags=["claude-code", "conversation"] + (tag or []),
+                title=result["title"],
+                source_type="claude-code",
+                context=json.dumps(result["metadata"]),
+            )
         )

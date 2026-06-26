@@ -11,6 +11,8 @@ from typing import Annotated, Optional
 import httpx
 import typer
 
+from uridx.record import Record
+
 from .base import MissingExtractorDependency, file_uri, get_file_mtime, output, prepare_files
 
 EXTENSIONS = {".jpg", ".jpeg", ".png", ".gif", ".webp", ".bmp"}
@@ -22,7 +24,7 @@ def iter_records(
     tag: Optional[list[str]] = None,
     model: Optional[str] = None,
     base_url: Optional[str] = None,
-) -> Iterator[dict]:
+) -> Iterator[Record]:
     """Yield ingest records describing images via an Ollama vision model.
 
     model/base_url default from env (OLLAMA_VISION_MODEL/OLLAMA_BASE_URL) so a generic
@@ -58,18 +60,15 @@ def iter_records(
         if not description or not description.strip():
             continue
 
-        yield {
-            "source_uri": file_uri(img_file),
-            "chunks": [
-                {"text": description.strip(), "key": "description", "meta": {"original_filename": img_file.name}}
-            ],
-            "tags": ["image"] + (tag or []),
-            "title": img_file.stem,
-            "source_type": "image",
-            "context": json.dumps({"path": str(img_file), "vision_model": vision_model}),
-            "replace": True,
-            "created_at": get_file_mtime(img_file),
-        }
+        yield Record(
+            source_uri=file_uri(img_file),
+            chunks=[{"text": description.strip(), "key": "description", "meta": {"original_filename": img_file.name}}],
+            tags=["image"] + (tag or []),
+            title=img_file.stem,
+            source_type="image",
+            context=json.dumps({"path": str(img_file), "vision_model": vision_model}),
+            created_at=get_file_mtime(img_file),
+        )
 
 
 def extract(

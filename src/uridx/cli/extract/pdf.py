@@ -8,12 +8,14 @@ from typing import Annotated, Optional
 
 import typer
 
+from uridx.record import Record
+
 from .base import MissingExtractorDependency, file_uri, output, prepare_files
 
 EXTENSIONS = {".pdf"}
 
 
-def iter_records(files: list[Path], *, tag: Optional[list[str]] = None) -> Iterator[dict]:
+def iter_records(files: list[Path], *, tag: Optional[list[str]] = None) -> Iterator[Record]:
     """Yield ingest records for PDF files, one chunk per page (requires pdfplumber)."""
     try:
         import pdfplumber
@@ -39,15 +41,14 @@ def iter_records(files: list[Path], *, tag: Optional[list[str]] = None) -> Itera
         if not chunks:
             continue
 
-        yield {
-            "source_uri": file_uri(pdf_file),
-            "chunks": chunks,
-            "tags": ["pdf", "document"] + (tag or []),
-            "title": pdf_file.stem,
-            "source_type": "pdf",
-            "context": json.dumps({"path": str(pdf_file), "pages": len(chunks)}),
-            "replace": True,
-        }
+        yield Record(
+            source_uri=file_uri(pdf_file),
+            chunks=chunks,
+            tags=["pdf", "document"] + (tag or []),
+            title=pdf_file.stem,
+            source_type="pdf",
+            context=json.dumps({"path": str(pdf_file), "pages": len(chunks)}),
+        )
 
 
 def extract(

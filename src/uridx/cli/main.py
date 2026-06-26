@@ -5,6 +5,7 @@ from datetime import datetime
 from typing import Annotated, Optional
 
 import typer
+from pydantic import ValidationError
 from rich.console import Console
 from rich.progress import BarColumn, MofNCompleteColumn, Progress, SpinnerColumn, TextColumn
 
@@ -22,6 +23,7 @@ from uridx.db.operations import (
     ingest_record,
     list_items_by_prefix,
 )
+from uridx.record import ChunkInput, Record
 from uridx.search.hybrid import hybrid_search
 
 app = typer.Typer()
@@ -79,7 +81,6 @@ def search(
 def ingest(
     jsonl: Annotated[bool, typer.Option("--jsonl")] = False,
     text: Annotated[Optional[str], typer.Option("--text")] = None,
-    replace: Annotated[bool, typer.Option("--replace")] = False,
     tag: Annotated[Optional[list[str]], typer.Option("--tag", "-t", help="Tags for ingested items")] = None,
 ):
     init_db()
@@ -90,9 +91,8 @@ def ingest(
         with console.status(f"Ingesting {text}..."):
             item = add_item(
                 source_uri=text,
-                chunks=[{"text": content}],
+                chunks=[ChunkInput(text=content)],
                 tags=tag,
-                replace=replace,
                 machine=get_machine_id(),
             )
         print(json.dumps({"source_uri": item.source_uri, "chunks": len(item.chunks)}))
@@ -107,10 +107,14 @@ def ingest(
             console=console,
         ) as progress:
             task = progress.add_task("Ingesting...", total=len(lines))
-            for line in lines:
-                data = json.loads(line)
-                progress.update(task, description=f"{data.get('source_uri', 'unknown')[:60]}")
-                ingest_record(data, extra_tags=tag, default_replace=replace)
+            for i, line in enumerate(lines, 1):
+                try:
+                    record = Record.model_validate_json(line)
+                except ValidationError as e:
+                    print(f"Error: invalid record on line {i}:\n{e}", file=sys.stderr)
+                    raise typer.Exit(1)
+                progress.update(task, description=f"{record.source_uri[:60]}")
+                ingest_record(record, extra_tags=tag)
                 count += 1
                 progress.advance(task)
         print(json.dumps({"ingested": count}))
@@ -179,9 +183,9 @@ def add(
                 for rec in module.iter_records(survivors, tag=tag):
                     ingest_record(rec)
                     ingested += 1
-                    stype = rec.get("source_type") or name
+                    stype = rec.source_type or name
                     by_type[stype] = by_type.get(stype, 0) + 1
-                    progress.update(task, description=f"{name}: {(rec.get('source_uri') or '')[:50]}")
+                    progress.update(task, description=f"{name}: {rec.source_uri[:50]}")
             except MissingExtractorDependency as e:
                 print(f"Skipping {name}: {e}", file=sys.stderr)
 

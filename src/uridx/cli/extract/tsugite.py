@@ -8,6 +8,8 @@ from typing import Annotated, Optional
 
 import typer
 
+from uridx.record import Record
+
 from .base import filter_existing, output
 
 # Patterns for system/tool content to skip in user messages
@@ -218,13 +220,12 @@ def extract(
         all_tags = auto_tags + (tag or [])
 
         output(
-            {
-                "source_uri": base_uri,
-                "chunks": result["chunks"],
-                "tags": all_tags,
-                "title": result["title"],
-                "source_type": "tsugite",
-                "context": json.dumps(result["metadata"]),
-                "replace": True,
-            }
+            Record(
+                source_uri=base_uri,
+                chunks=result["chunks"],
+                tags=all_tags,
+                title=result["title"],
+                source_type="tsugite",
+                context=json.dumps(result["metadata"]),
+            )
         )

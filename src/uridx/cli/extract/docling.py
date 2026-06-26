@@ -9,6 +9,8 @@ from urllib.parse import urlparse
 
 import typer
 
+from uridx.record import Record
+
 from .base import MissingExtractorDependency, file_uri, filter_existing, get_file_mtime, output, resolve_paths
 
 EXTENSIONS = {
@@ -31,7 +33,7 @@ EXTENSIONS = {
 }
 
 
-def iter_records(sources: list[Union[str, Path]], *, tag: Optional[list[str]] = None) -> Iterator[dict]:
+def iter_records(sources: list[Union[str, Path]], *, tag: Optional[list[str]] = None) -> Iterator[Record]:
     """Yield ingest records for docling-supported sources (local files or http(s) URLs).
 
     `add` passes local Paths only; the `extract` wrapper may also pass URL strings.
@@ -89,7 +91,7 @@ def extract(
 
 def _build_record(
     converter, chunker, source: str, source_uri: str, created_at: str | None, extra_tags: list[str]
-) -> Optional[dict]:
+) -> Optional[Record]:
     """Convert a single source and return an ingest record (or None on error/empty)."""
     try:
         result = converter.convert(source)
@@ -116,15 +118,12 @@ def _build_record(
         title = Path(source).stem
         ext = Path(source).suffix.lstrip(".").lower()
 
-    record = {
-        "source_uri": source_uri,
-        "chunks": chunks,
-        "tags": ["document", *([ext] if ext else []), *extra_tags],
-        "title": title,
-        "source_type": "document",
-        "context": json.dumps({"source": source}),
-        "replace": True,
-    }
-    if created_at:
-        record["created_at"] = created_at
-    return record
+    return Record(
+        source_uri=source_uri,
+        chunks=chunks,
+        tags=["document", *([ext] if ext else []), *extra_tags],
+        title=title,
+        source_type="document",
+        context=json.dumps({"source": source}),
+        created_at=created_at,
+    )
