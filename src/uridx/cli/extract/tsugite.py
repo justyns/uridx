@@ -1,9 +1,16 @@
-"""Extract Tsugite chat history from ~/.local/share/tsugite/history/"""
+"""Extract Tsugite chat history from its SQLite backend (history.db).
+
+Tsugite stores sessions in a single SQLite database (event-sourced: a `sessions`
+row plus an `events` stream). We read it directly so uridx stays standalone, and
+reconstruct User/Assistant turns from `user_input` (data.text) and `model_response`
+(data.raw_content) events the same way tsugite renders a conversation.
+"""
 
 import json
-import re
+import os
+import sqlite3
 import sys
-from dataclasses import dataclass
+from datetime import datetime
 from pathlib import Path
 from typing import Annotated, Optional
 
@@ -13,221 +20,139 @@ from uridx.record import ChunkInput, Record
 
 from .base import filter_existing, output
 
-# Patterns for system/tool content to skip in user messages
-_SKIP_PATTERNS = (
-    "<tsugite_execution_result",
-    "<scheduled_task",
-    "<context_update",
-)
+DEFAULT_DB = Path.home() / ".local" / "share" / "tsugite" / "history" / "history.db"
 
 
-@dataclass
-class ParsedSession:
-    """A parsed Tsugite session: turn chunks plus the metadata needed to build its URI."""
-
-    chunks: list[ChunkInput]
-    title: str
-    metadata: dict
-    agent: str
-    session_id: str
+def _resolve_db(path: Optional[Path]) -> Path:
+    """Resolve the history.db path: explicit arg (a .db file or its dir), env, or XDG default."""
+    if path is not None:
+        return path / "history.db" if path.is_dir() else path
+    env = os.getenv("TSUGITE_HISTORY_DB")
+    return Path(env) if env else DEFAULT_DB
 
 
-def _extract_text(content) -> str:
-    """Extract text from message content (string or list of blocks)."""
-    if isinstance(content, str):
-        return content
-    if isinstance(content, list):
-        texts = []
-        for block in content:
-            if isinstance(block, dict) and block.get("type") == "text":
-                texts.append(block.get("text", ""))
-            elif isinstance(block, str):
-                texts.append(block)
-        return "\n".join(texts)
-    return ""
+def _connect_ro(db_path: Path) -> sqlite3.Connection:
+    conn = sqlite3.connect(str(db_path))
+    conn.row_factory = sqlite3.Row
+    conn.execute("PRAGMA query_only=ON")
+    conn.execute("PRAGMA busy_timeout=5000")
+    return conn
 
 
-def _is_system_content(text: str) -> bool:
-    """Check if content is system/tool output that should be skipped."""
-    stripped = text.lstrip()
-    return any(stripped.startswith(pat) for pat in _SKIP_PATTERNS)
-
-
-def _build_turns(messages: list[dict]) -> list[ChunkInput]:
-    """Build turn chunks from a list of turn records."""
+def _build_turns(conn: sqlite3.Connection, session_id: str) -> list[ChunkInput]:
+    """Reconstruct User/Assistant turn chunks from a session's events, ordered by event id."""
     turns: list[ChunkInput] = []
+    current_user: Optional[str] = None
+    current_assistant: list[str] = []
 
-    for record in messages:
-        if record.get("type") != "turn":
-            continue
-
-        msgs = record.get("messages", [])
-        user_parts = []
-        assistant_parts = []
-
-        for msg in msgs:
-            role = msg.get("role", "")
-            text = _extract_text(msg.get("content", ""))
-            if not text.strip():
-                continue
-
-            if role == "user":
-                if not _is_system_content(text):
-                    user_parts.append(text)
-            elif role == "assistant":
-                assistant_parts.append(text)
-
-        # Build the chunk text
-        text_parts = []
-        if user_parts:
-            text_parts.append(f"User: {' '.join(user_parts)}")
-        if assistant_parts:
-            text_parts.append(f"Assistant: {' '.join(assistant_parts)}")
-
-        if text_parts:
+    def _emit() -> None:
+        parts = []
+        if current_user:
+            parts.append(f"User: {current_user}")
+        if current_assistant:
+            parts.append(f"Assistant: {' '.join(current_assistant)}")
+        if parts:
             turns.append(
                 ChunkInput(
-                    text="\n\n".join(text_parts),
+                    text="\n\n".join(parts),
                     key=f"turn-{len(turns)}",
                     meta={"turn_index": len(turns)},
                 )
             )
 
+    rows = conn.execute(
+        "SELECT type, data FROM events WHERE session_id=? AND type IN ('user_input', 'model_response') ORDER BY id",
+        (session_id,),
+    )
+    for row in rows:
+        data = json.loads(row["data"])
+        if row["type"] == "user_input":
+            text = (data.get("text") or "").strip()
+            if not text:
+                continue
+            if current_user or current_assistant:
+                _emit()
+            current_user = text
+            current_assistant = []
+        else:  # model_response
+            text = (data.get("raw_content") or "").strip()
+            if text:
+                current_assistant.append(text)
+
+    if current_user or current_assistant:
+        _emit()
     return turns
 
 
-def _parse_session(jsonl_path: Path) -> ParsedSession | None:
-    """Parse a Tsugite session JSONL file into chunks."""
-    records = []
-    meta = {}
-
-    with open(jsonl_path, encoding="utf-8") as f:
-        for line in f:
-            line = line.strip()
-            if not line:
-                continue
-            try:
-                record = json.loads(line)
-            except json.JSONDecodeError:
-                continue
-
-            rtype = record.get("type")
-            if rtype == "session_meta":
-                meta = {
-                    "agent": record.get("agent", "unknown"),
-                    "model": record.get("model"),
-                    "machine": record.get("machine"),
-                    "created_at": record.get("created_at"),
-                    "compacted_from": record.get("compacted_from"),
-                }
-            elif rtype == "turn":
-                records.append(record)
-
-    if not records:
-        return None
-
-    chunks = _build_turns(records)
-    if not chunks:
-        return None
-
-    agent = meta.get("agent", "unknown")
-    session_id = jsonl_path.stem
-    title = f"{agent}: {session_id}"
-
-    return ParsedSession(chunks=chunks, title=title, metadata=meta, agent=agent, session_id=session_id)
-
-
-def _extract_agent_from_filename(name: str) -> str | None:
-    """Try to extract agent name from filename like 20260310_084034_odyn_f30fa0."""
-    parts = name.split("_")
-    if len(parts) >= 3:
-        return parts[2]
-    return None
-
-
-def _extract_date_from_filename(name: str) -> str | None:
-    """Extract date string (YYYYMMDD) from filename."""
-    parts = name.split("_")
-    if parts and re.match(r"^\d{8}$", parts[0]):
-        return parts[0]
-    return None
-
-
 def extract(
-    path: Annotated[Optional[Path], typer.Argument(help="History directory")] = None,
+    path: Annotated[
+        Optional[Path], typer.Argument(help="history.db file or its directory (default: XDG tsugite history)")
+    ] = None,
     agent: Annotated[Optional[str], typer.Option("--agent", "-a", help="Filter by agent name")] = None,
     since: Annotated[
-        Optional[str], typer.Option("--since", "-s", help="Only sessions after this date (YYYY-MM-DD)")
+        Optional[str], typer.Option("--since", "-s", help="Only sessions created on/after this date (YYYY-MM-DD)")
     ] = None,
-    force: Annotated[bool, typer.Option("--force", "-f", help="Re-process all files")] = False,
+    force: Annotated[bool, typer.Option("--force", "-f", help="Re-process all sessions")] = False,
     tag: Annotated[Optional[list[str]], typer.Option("--tag", "-t", help="Additional tags")] = None,
 ):
-    """Extract Tsugite chat history from session JSONL files."""
-    history_dir = path or (Path.home() / ".local" / "share" / "tsugite" / "history")
-
-    if not history_dir.exists():
-        print(f"History directory not found: {history_dir}", file=sys.stderr)
+    """Extract Tsugite chat history from its SQLite backend (history.db)."""
+    db_path = _resolve_db(path)
+    if not db_path.is_file():
+        print(f"Tsugite history database not found: {db_path}", file=sys.stderr)
         raise typer.Exit(1)
 
-    # Parse since date filter
-    since_date = None
     if since:
         try:
-            since_date = since.replace("-", "")  # YYYY-MM-DD -> YYYYMMDD
-        except Exception:
+            datetime.strptime(since, "%Y-%m-%d")
+        except ValueError:
             print(f"Invalid date format: {since} (expected YYYY-MM-DD)", file=sys.stderr)
             raise typer.Exit(1)
 
-    # Collect candidate files with pre-filtering
-    source_uri_map: dict[str, Path] = {}
-    for jsonl_file in history_dir.glob("*.jsonl"):
-        if jsonl_file.stat().st_size == 0:
-            continue
+    conn = _connect_ro(db_path)
 
-        stem = jsonl_file.stem
-        file_agent = _extract_agent_from_filename(stem)
+    clauses, params = [], []
+    if agent:
+        clauses.append("agent = ?")
+        params.append(agent)
+    if since:
+        clauses.append("created_at >= ?")  # created_at is ISO-8601 UTC, so string compare is chronological
+        params.append(since)
+    where = (" WHERE " + " AND ".join(clauses)) if clauses else ""
+    sessions = conn.execute(
+        f"SELECT session_id, agent, model, workspace, created_at, ended_at, status FROM sessions{where} "
+        "ORDER BY created_at DESC",
+        params,
+    ).fetchall()
 
-        # Fast agent filter from filename (avoids parsing the file)
-        if agent and file_agent and file_agent != agent:
-            continue
-
-        # Fast date filter from filename
-        if since_date:
-            file_date = _extract_date_from_filename(stem)
-            if file_date and file_date < since_date:
-                continue
-
-        uri = f"tsugite://{file_agent or 'unknown'}/{stem}"
-        source_uri_map[uri] = jsonl_file
-
-    filter_existing(source_uri_map, force, label=lambda v: v.name)
+    source_uri_map: dict[str, sqlite3.Row] = {}
+    for s in sessions:
+        source_uri_map[f"tsugite://{s['agent'] or 'unknown'}/{s['session_id']}"] = s
+    filter_existing(source_uri_map, force, label=lambda s: s["session_id"])
     if not source_uri_map:
         return
 
-    for source_uri, jsonl_file in source_uri_map.items():
-        try:
-            result = _parse_session(jsonl_file)
-        except Exception as e:
-            print(f"Error parsing {jsonl_file.name}: {e}", file=sys.stderr)
+    for source_uri, s in source_uri_map.items():
+        chunks = _build_turns(conn, s["session_id"])
+        if not chunks:
             continue
 
-        if not result or not result.chunks:
-            continue
-
-        # If --agent was specified but the file's meta agent doesn't match, skip
-        if agent and result.agent != agent:
-            continue
-
-        base_uri = f"tsugite://{result.agent}/{result.session_id}"
-        all_tags = [result.agent, "conversation", "tsugite"] + (tag or [])
-
+        agent_name = s["agent"] or "unknown"
+        metadata = {
+            "agent": s["agent"],
+            "model": s["model"],
+            "workspace": s["workspace"],
+            "created_at": s["created_at"],
+            "ended_at": s["ended_at"],
+            "status": s["status"],
+        }
         output(
             Record(
-                source_uri=base_uri,
-                chunks=result.chunks,
-                tags=all_tags,
-                title=result.title,
+                source_uri=source_uri,
+                chunks=chunks,
+                tags=[agent_name, "conversation", "tsugite"] + (tag or []),
+                title=f"{agent_name}: {s['session_id']}",
                 source_type="tsugite",
-                context=json.dumps(result.metadata),
+                context=json.dumps(metadata),
+                created_at=s["created_at"],
             )
         )
