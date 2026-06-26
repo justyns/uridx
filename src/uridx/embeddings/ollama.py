@@ -1,12 +1,19 @@
 import httpx
 
+from uridx.config import normalize_ollama_url
+
 DEFAULT_TIMEOUT = 60.0
+
+
+def _url(base_url: str, path: str) -> str:
+    """Build a native Ollama API URL, tolerating an OpenAI-compat /v1 suffix on base_url."""
+    return f"{normalize_ollama_url(base_url)}{path}"
 
 
 def get_dimension(model: str, base_url: str) -> int:
     with httpx.Client(timeout=DEFAULT_TIMEOUT) as client:
         response = client.post(
-            f"{base_url}/api/show",
+            _url(base_url, "/api/show"),
             json={"name": model},
         )
         response.raise_for_status()
@@ -24,7 +31,7 @@ def get_dimension(model: str, base_url: str) -> int:
 def get_embeddings_sync(texts: list[str], model: str, base_url: str) -> list[list[float]]:
     with httpx.Client(timeout=DEFAULT_TIMEOUT) as client:
         response = client.post(
-            f"{base_url}/api/embed",
+            _url(base_url, "/api/embed"),
             json={"model": model, "input": texts},
         )
         response.raise_for_status()
@@ -34,7 +41,7 @@ def get_embeddings_sync(texts: list[str], model: str, base_url: str) -> list[lis
 async def get_embeddings(texts: list[str], model: str, base_url: str) -> list[list[float]]:
     async with httpx.AsyncClient(timeout=DEFAULT_TIMEOUT) as client:
         response = await client.post(
-            f"{base_url}/api/embed",
+            _url(base_url, "/api/embed"),
             json={"model": model, "input": texts},
         )
         response.raise_for_status()

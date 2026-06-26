@@ -11,6 +11,7 @@ from typing import Annotated, Optional
 import httpx
 import typer
 
+from uridx.config import normalize_ollama_url
 from uridx.record import Record
 
 from .base import MissingExtractorDependency, file_uri, get_file_mtime, output, prepare_files
@@ -31,7 +32,7 @@ def iter_records(
     caller (the `add` command) needs no extra args. Raises MissingExtractorDependency
     if Ollama is unreachable, so a whole image bucket is skipped rather than crashing.
     """
-    ollama_url = base_url or os.getenv("OLLAMA_BASE_URL", "http://localhost:11434")
+    ollama_url = normalize_ollama_url(base_url or os.getenv("OLLAMA_BASE_URL", "http://localhost:11434"))
     vision_model = model or os.getenv("OLLAMA_VISION_MODEL", "llama3.2-vision")
 
     for img_file in files:

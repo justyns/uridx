@@ -10,6 +10,20 @@ FASTEMBED_MODEL = os.getenv("FASTEMBED_MODEL", "nomic-ai/nomic-embed-text-v1.5")
 OLLAMA_BASE_URL = os.getenv("OLLAMA_BASE_URL", "http://localhost:11434")
 OLLAMA_EMBED_MODEL = os.getenv("OLLAMA_EMBED_MODEL", "qwen3-embedding:0.6b")
 
+
+def normalize_ollama_url(url: str) -> str:
+    """Strip a trailing ``/v1`` (the OpenAI-compat suffix) and trailing slashes.
+
+    uridx uses Ollama's native API (``/api/...``), but many users set
+    ``OLLAMA_BASE_URL=http://host:11434/v1`` for OpenAI-compatible tools. Without this
+    the native endpoints would resolve to ``/v1/api/embed`` and 404.
+    """
+    url = url.rstrip("/")
+    if url.endswith("/v1"):
+        url = url[: -len("/v1")].rstrip("/")
+    return url
+
+
 URIDX_MIN_SCORE: float | None = float(v) if (v := os.getenv("URIDX_MIN_SCORE")) else None
 
 
