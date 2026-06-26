@@ -9,6 +9,8 @@ from rich.console import Console
 from rich.progress import BarColumn, MofNCompleteColumn, Progress, SpinnerColumn, TextColumn
 
 from uridx.cli.extract import app as extract_app
+from uridx.cli.extract.base import MissingExtractorDependency, filter_existing_files
+from uridx.cli.extract.registry import load_extractor, resolve_dispatch
 from uridx.config import get_machine_id
 from uridx.db.engine import init_db
 from uridx.db.operations import (
@@ -17,6 +19,7 @@ from uridx.db.operations import (
     delete_items_by_prefix,
     get_item,
     get_stats,
+    ingest_record,
     list_items_by_prefix,
 )
 from uridx.search.hybrid import hybrid_search
@@ -106,25 +109,92 @@ def ingest(
             task = progress.add_task("Ingesting...", total=len(lines))
             for line in lines:
                 data = json.loads(line)
-                source_uri = data.get("source_uri", "unknown")
-                progress.update(task, description=f"{source_uri[:60]}")
-                record_tags = data.get("tags") or []
-                if tag:
-                    record_tags = list(dict.fromkeys(record_tags + tag))
-                add_item(
-                    source_uri=data["source_uri"],
-                    title=data.get("title"),
-                    context=data.get("context"),
-                    source_type=data.get("source_type"),
-                    tags=record_tags or None,
-                    chunks=data.get("chunks", []),
-                    replace=data.get("replace", replace),
-                    created_at=data.get("created_at"),
-                    machine=data.get("machine") or get_machine_id(),
-                )
+                progress.update(task, description=f"{data.get('source_uri', 'unknown')[:60]}")
+                ingest_record(data, extra_tags=tag, default_replace=replace)
                 count += 1
                 progress.advance(task)
         print(json.dumps({"ingested": count}))
+
+
+@app.command()
+def add(
+    paths: Annotated[list[str], typer.Argument(help="Files or directories to index")],
+    extractor: Annotated[
+        Optional[str], typer.Option("--extractor", "-e", help="Force a specific extractor (markdown/pdf/image/docling)")
+    ] = None,
+    force: Annotated[bool, typer.Option("--force", "-f", help="Re-ingest even if already indexed")] = False,
+    tag: Annotated[Optional[list[str]], typer.Option("--tag", "-t", help="Tags to add to ingested items")] = None,
+    dry_run: Annotated[bool, typer.Option("--dry-run", help="Show what would be ingested without doing it")] = False,
+):
+    """Add files or directories, auto-detecting the extractor by file extension.
+
+    Porcelain over `extract | ingest`. Already-indexed files are skipped unless --force.
+    Structured sources (Claude Code / Tsugite) are not auto-detected; use `extract`.
+    """
+    urls = [p for p in paths if p.startswith(("http://", "https://"))]
+    if urls:
+        print(
+            f"Error: 'add' does not accept URLs ({urls[0]}). Use: uridx extract docling <url> | uridx ingest",
+            file=sys.stderr,
+        )
+        raise typer.Exit(2)
+
+    try:
+        buckets, skipped = resolve_dispatch(paths, extractor)
+    except ValueError as e:
+        print(f"Error: {e}", file=sys.stderr)
+        raise typer.Exit(2)
+
+    if dry_run:
+        for name, files in buckets.items():
+            for f in files:
+                print(f"{f}\t{name}")
+        for f in skipped:
+            print(f"{f}\t(no extractor)")
+        return
+
+    init_db()
+    console = Console(stderr=True)
+
+    # Pre-filter each bucket so already-indexed files are dropped (and reported) before any heavy work.
+    plan: list[tuple[str, list]] = []
+    skipped_existing = 0
+    for name, files in buckets.items():
+        survivors = filter_existing_files(files, force)
+        skipped_existing += len(files) - len(survivors)
+        if survivors:
+            plan.append((name, survivors))
+
+    ingested = 0
+    by_type: dict[str, int] = {}
+    with Progress(
+        SpinnerColumn(),
+        TextColumn("[progress.description]{task.description}"),
+        console=console,
+    ) as progress:
+        task = progress.add_task("Adding...", total=None)
+        for name, survivors in plan:
+            module = load_extractor(name)
+            try:
+                for rec in module.iter_records(survivors, tag=tag):
+                    ingest_record(rec)
+                    ingested += 1
+                    stype = rec.get("source_type") or name
+                    by_type[stype] = by_type.get(stype, 0) + 1
+                    progress.update(task, description=f"{name}: {(rec.get('source_uri') or '')[:50]}")
+            except MissingExtractorDependency as e:
+                print(f"Skipping {name}: {e}", file=sys.stderr)
+
+    print(
+        json.dumps(
+            {
+                "ingested": ingested,
+                "skipped_unknown": len(skipped),
+                "skipped_existing": skipped_existing,
+                "by_type": by_type,
+            }
+        )
+    )
 
 
 @app.command()

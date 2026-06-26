@@ -6,6 +6,20 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 
+class MissingExtractorDependency(Exception):
+    """Raised by an extractor when an optional dependency or service is unavailable.
+
+    The `extract` command wrapper turns this into a friendly hint + exit; the `add`
+    command catches it per-bucket and warns+skips so one missing dep/service doesn't
+    abort a whole multi-type run.
+    """
+
+
+def file_uri(path: Path) -> str:
+    """Canonical file:// URI for a local path."""
+    return f"file://{path.resolve()}"
+
+
 def get_file_mtime(path: Path) -> str:
     """Get file modification time as ISO8601 string."""
     mtime = path.stat().st_mtime
@@ -42,3 +56,15 @@ def filter_existing(source_uri_map: dict, force: bool, label=lambda v: v) -> Non
     for uri in get_existing_source_uris(list(source_uri_map.keys())):
         print(f"Skipping {label(source_uri_map[uri])} (already ingested)", file=sys.stderr)
         del source_uri_map[uri]
+
+
+def filter_existing_files(files: list[Path], force: bool) -> list[Path]:
+    """Drop already-ingested files from a resolved file list (no-op when force)."""
+    source_map = {file_uri(f): f for f in files}
+    filter_existing(source_map, force)
+    return list(source_map.values())
+
+
+def prepare_files(paths: list[Path], extensions: set[str], force: bool) -> list[Path]:
+    """Resolve paths to matching files, dropping already-ingested ones (unless force)."""
+    return filter_existing_files(resolve_paths(paths, extensions), force)

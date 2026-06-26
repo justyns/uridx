@@ -5,6 +5,7 @@ from datetime import datetime
 
 from sqlmodel import func, select
 
+from uridx.config import get_machine_id
 from uridx.db.engine import get_raw_connection, get_session
 from uridx.db.models import Chunk, Item, Location, Tag
 from uridx.embeddings import get_embeddings_sync, serialize_embedding
@@ -57,7 +58,7 @@ def add_item(
     machine: str | None = None,
 ) -> Item:
     chunks = chunks or []
-    tags = tags or []
+    tags = list(dict.fromkeys(tags or []))
     new_hash = compute_content_hash(chunks)
 
     # Parse created_at if string
@@ -157,6 +158,33 @@ def add_item(
 
         session.refresh(item)
         return _detach_item(session, item)
+
+
+def ingest_record(
+    data: dict,
+    *,
+    extra_tags: list[str] | None = None,
+    default_replace: bool = False,
+    default_machine: str | None = None,
+) -> Item:
+    """Ingest one record dict (the JSONL shape extractors emit) via add_item.
+
+    Shared by the `ingest` and `add` CLI commands. Does NOT init the DB — the
+    caller must call init_db() once before looping.
+    """
+    tags = ((data.get("tags") or []) + (extra_tags or [])) or None  # add_item dedups
+    machine = data.get("machine") or default_machine or get_machine_id()
+    return add_item(
+        source_uri=data["source_uri"],
+        title=data.get("title"),
+        context=data.get("context"),
+        source_type=data.get("source_type"),
+        tags=tags,
+        chunks=data.get("chunks", []),
+        replace=data.get("replace", default_replace),
+        created_at=data.get("created_at"),
+        machine=machine,
+    )
 
 
 def _delete_item_in_session(session, item: Item) -> None:

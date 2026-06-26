@@ -119,7 +119,13 @@ def get_session() -> Session:
     return Session(get_engine())
 
 
+_db_initialized = False
+
+
 def init_db():
+    global _db_initialized
+    if _db_initialized:
+        return
     engine = get_engine()
     SQLModel.metadata.create_all(engine)
 
@@ -164,3 +170,4 @@ def init_db():
 
     conn.commit()
     conn.close()
+    _db_initialized = True

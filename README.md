@@ -16,7 +16,23 @@ ollama pull qwen3-embedding:0.6b
 
 ## CLI Usage
 
+### Add files
+
+The quickest way to index files or folders is to use `uridx add <path>`. The extractor is auto-detected by file extension, but you can override it with `--extractor <name>`.:
+
+```bash
+uridx add notes.md                        # single file
+uridx add ./notes/                        # whole directory (recursive)
+uridx add ./docs/ --tag work              # tag everything
+uridx add report.pdf --extractor docling  # force an extractor
+uridx add ./mixed/ --dry-run              # preview "path -> extractor", ingest nothing
+```
+
+For extractors that aren't actual files on disk (e.g. ingesting claude code/tsugite conversations, remote http urls, etc), use the `extract … | ingest` pipe below.
+
 ### Ingest content
+
+For structured data, remote/multi-machine ingest, or piping between machines, use the composable `extract … | ingest` pipe directly.
 
 JSONL format (recommended for structured data):
 ```bash

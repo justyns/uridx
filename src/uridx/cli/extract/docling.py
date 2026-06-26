@@ -2,15 +2,16 @@
 
 import json
 import sys
+from collections.abc import Iterator
 from pathlib import Path
-from typing import Annotated, Optional
+from typing import Annotated, Optional, Union
 from urllib.parse import urlparse
 
 import typer
 
-from .base import filter_existing, get_file_mtime, output, resolve_paths
+from .base import MissingExtractorDependency, file_uri, filter_existing, get_file_mtime, output, resolve_paths
 
-SUPPORTED_EXTENSIONS = {
+EXTENSIONS = {
     ".pdf",
     ".docx",
     ".xlsx",
@@ -30,54 +31,73 @@ SUPPORTED_EXTENSIONS = {
 }
 
 
+def iter_records(sources: list[Union[str, Path]], *, tag: Optional[list[str]] = None) -> Iterator[dict]:
+    """Yield ingest records for docling-supported sources (local files or http(s) URLs).
+
+    `add` passes local Paths only; the `extract` wrapper may also pass URL strings.
+    The DocumentConverter/HybridChunker are built lazily on first iteration. Raises
+    MissingExtractorDependency if docling isn't installed.
+    """
+    try:
+        from docling.document_converter import DocumentConverter
+        from docling_core.transforms.chunker import HybridChunker
+    except ImportError as e:
+        raise MissingExtractorDependency("docling not installed. Install with: uv pip install 'uridx[docling]'") from e
+
+    converter = DocumentConverter()
+    chunker = HybridChunker()
+    extra_tags = tag or []
+
+    for source in sources:
+        if isinstance(source, str) and source.startswith(("http://", "https://")):
+            source_uri, convert_arg, created_at = source, source, None
+        else:
+            path = Path(source)
+            source_uri, convert_arg, created_at = file_uri(path), str(path), get_file_mtime(path)
+        record = _build_record(converter, chunker, convert_arg, source_uri, created_at, extra_tags)
+        if record:
+            yield record
+
+
 def extract(
     sources: Annotated[Optional[list[str]], typer.Argument(help="Files, directories, or URLs")] = None,
     force: Annotated[bool, typer.Option("--force", "-f", help="Re-process all files even if already ingested")] = False,
     tag: Annotated[Optional[list[str]], typer.Option("--tag", "-t", help="Additional tags")] = None,
 ):
     """Extract documents using docling (requires docling)."""
-    try:
-        from docling.document_converter import DocumentConverter
-        from docling_core.transforms.chunker import HybridChunker
-    except ImportError:
-        print("docling not installed. Install with: uv pip install 'uridx[docling]'", file=sys.stderr)
-        raise typer.Exit(1)
-
     sources = sources or []
-    urls = [s for s in sources if s.startswith(("http://", "https://"))]
+    urls: list[Union[str, Path]] = [s for s in sources if s.startswith(("http://", "https://"))]
     local_paths = [Path(s) for s in sources if not s.startswith(("http://", "https://"))]
 
-    # Build list of source_uris that will be generated
-    source_uri_map: dict[str, tuple[str, str | None]] = {}
-    for url in urls:
-        source_uri_map[url] = (url, None)
-    for file_path in resolve_paths(local_paths, SUPPORTED_EXTENSIONS):
-        uri = f"file://{file_path.resolve()}"
-        source_uri_map[uri] = (str(file_path), get_file_mtime(file_path))
+    # Filter already-ingested by URI (URLs keyed as-is, files as file://). Keep surviving sources.
+    uri_map: dict[str, Union[str, Path]] = {url: url for url in urls}
+    for file_path in resolve_paths(local_paths, EXTENSIONS):
+        uri_map[file_uri(file_path)] = file_path
+    filter_existing(uri_map, force, label=str)
 
-    filter_existing(source_uri_map, force, label=lambda v: v[0])
-    if not source_uri_map:
+    survivors = list(uri_map.values())
+    if not survivors:
         return
 
-    converter = DocumentConverter()
-    chunker = HybridChunker()
+    try:
+        for rec in iter_records(survivors, tag=tag):
+            output(rec)
+    except MissingExtractorDependency as e:
+        print(str(e), file=sys.stderr)
+        raise typer.Exit(1)
 
-    extra_tags = tag or []
-    for source_uri, (source, created_at) in source_uri_map.items():
-        _convert_source(converter, chunker, source, source_uri, created_at=created_at, extra_tags=extra_tags)
 
-
-def _convert_source(
-    converter, chunker, source: str, source_uri: str, created_at: str | None = None, extra_tags: list[str] = ()
-):
-    """Convert a single source and output JSONL."""
+def _build_record(
+    converter, chunker, source: str, source_uri: str, created_at: str | None, extra_tags: list[str]
+) -> Optional[dict]:
+    """Convert a single source and return an ingest record (or None on error/empty)."""
     try:
         result = converter.convert(source)
         doc = result.document
         chunk_iter = chunker.chunk(dl_doc=doc)
     except Exception as e:
         print(f"Error processing {source}: {e}", file=sys.stderr)
-        return
+        return None
 
     chunks = []
     for i, chunk in enumerate(chunk_iter):
@@ -86,7 +106,7 @@ def _convert_source(
             chunks.append({"text": text, "key": f"chunk-{i}"})
 
     if not chunks:
-        return
+        return None
 
     parsed = urlparse(source)
     if parsed.scheme in ("http", "https"):
@@ -107,4 +127,4 @@ def _convert_source(
     }
     if created_at:
         record["created_at"] = created_at
-    output(record)
+    return record

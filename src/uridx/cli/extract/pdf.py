@@ -2,46 +2,25 @@
 
 import json
 import sys
+from collections.abc import Iterator
 from pathlib import Path
 from typing import Annotated, Optional
 
 import typer
 
-from .base import filter_existing, output
+from .base import MissingExtractorDependency, file_uri, output, prepare_files
+
+EXTENSIONS = {".pdf"}
 
 
-def extract(
-    path: Annotated[Optional[Path], typer.Argument(help="File or directory")] = None,
-    force: Annotated[bool, typer.Option("--force", "-f", help="Re-process all files even if already ingested")] = False,
-    tag: Annotated[Optional[list[str]], typer.Option("--tag", "-t", help="Additional tags")] = None,
-):
-    """Extract PDF files by page (requires pdfplumber)."""
+def iter_records(files: list[Path], *, tag: Optional[list[str]] = None) -> Iterator[dict]:
+    """Yield ingest records for PDF files, one chunk per page (requires pdfplumber)."""
     try:
         import pdfplumber
-    except ImportError:
-        print("pdfplumber not installed. Install with: uv pip install 'uridx[pdf]'", file=sys.stderr)
-        raise typer.Exit(1)
+    except ImportError as e:
+        raise MissingExtractorDependency("pdfplumber not installed. Install with: uv pip install 'uridx[pdf]'") from e
 
-    root = path or Path.cwd()
-
-    if root.is_file():
-        files = [root]
-    else:
-        files = list(root.rglob("*.pdf"))
-
-    # Build list of source_uris that will be generated
-    source_uri_map: dict[str, Path] = {}
     for pdf_file in files:
-        if not pdf_file.is_file():
-            continue
-        uri = f"file://{pdf_file.resolve()}"
-        source_uri_map[uri] = pdf_file
-
-    filter_existing(source_uri_map, force)
-    if not source_uri_map:
-        return
-
-    for source_uri, pdf_file in source_uri_map.items():
         chunks = []
         try:
             with pdfplumber.open(pdf_file) as pdf:
@@ -60,14 +39,26 @@ def extract(
         if not chunks:
             continue
 
-        output(
-            {
-                "source_uri": source_uri,
-                "chunks": chunks,
-                "tags": ["pdf", "document"] + (tag or []),
-                "title": pdf_file.stem,
-                "source_type": "pdf",
-                "context": json.dumps({"path": str(pdf_file), "pages": len(chunks)}),
-                "replace": True,
-            }
-        )
+        yield {
+            "source_uri": file_uri(pdf_file),
+            "chunks": chunks,
+            "tags": ["pdf", "document"] + (tag or []),
+            "title": pdf_file.stem,
+            "source_type": "pdf",
+            "context": json.dumps({"path": str(pdf_file), "pages": len(chunks)}),
+            "replace": True,
+        }
+
+
+def extract(
+    paths: Annotated[Optional[list[Path]], typer.Argument(help="Files or directories")] = None,
+    force: Annotated[bool, typer.Option("--force", "-f", help="Re-process all files even if already ingested")] = False,
+    tag: Annotated[Optional[list[str]], typer.Option("--tag", "-t", help="Additional tags")] = None,
+):
+    """Extract PDF files by page (requires pdfplumber)."""
+    try:
+        for rec in iter_records(prepare_files(paths or [], EXTENSIONS, force), tag=tag):
+            output(rec)
+    except MissingExtractorDependency as e:
+        print(str(e), file=sys.stderr)
+        raise typer.Exit(1)
