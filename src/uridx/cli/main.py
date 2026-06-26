@@ -29,6 +29,24 @@ from uridx.search.hybrid import hybrid_search
 app = typer.Typer()
 app.add_typer(extract_app, name="extract")
 
+SNIPPET_LIMIT = 400
+
+
+def _snippet(text: str, limit: int = SNIPPET_LIMIT) -> str:
+    """One-line preview: collapse whitespace, cut at a word boundary, ellipsize if shortened."""
+    text = " ".join(text.split())
+    if len(text) <= limit:
+        return text
+    cut = text[:limit]
+    space = cut.rfind(" ")
+    if space > limit * 0.6:  # only back up to a word boundary if it doesn't chop too much
+        cut = cut[:space]
+    return cut.rstrip() + "…"
+
+
+def _indent(text: str, prefix: str = "  ") -> str:
+    return "\n".join(prefix + line for line in text.splitlines())
+
 
 @app.command()
 def search(
@@ -37,6 +55,9 @@ def search(
     type: Annotated[Optional[str], typer.Option("--type")] = None,
     limit: Annotated[int, typer.Option("--limit", "-n")] = 10,
     json_output: Annotated[bool, typer.Option("--json", "-j")] = False,
+    full: Annotated[
+        bool, typer.Option("--full", help="Show complete chunk text instead of a truncated preview")
+    ] = False,
     semantic: Annotated[bool, typer.Option("--semantic/--no-semantic")] = True,
     recency_boost: Annotated[float, typer.Option("--recency-boost")] = 0.3,
     min_score: Annotated[Optional[float], typer.Option("--min-score")] = None,
@@ -73,7 +94,7 @@ def search(
                 print(f"  Type: {r.source_type}")
             if r.tags:
                 print(f"  Tags: {', '.join(r.tags)}")
-            print(f"  {r.chunk_text[:200]}...")
+            print(_indent(r.chunk_text) if full else f"  {_snippet(r.chunk_text)}")
             print()
 
 
