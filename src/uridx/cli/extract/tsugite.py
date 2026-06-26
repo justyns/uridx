@@ -3,12 +3,13 @@
 import json
 import re
 import sys
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Annotated, Optional
 
 import typer
 
-from uridx.record import Record
+from uridx.record import ChunkInput, Record
 
 from .base import filter_existing, output
 
@@ -18,6 +19,17 @@ _SKIP_PATTERNS = (
     "<scheduled_task",
     "<context_update",
 )
+
+
+@dataclass
+class ParsedSession:
+    """A parsed Tsugite session: turn chunks plus the metadata needed to build its URI."""
+
+    chunks: list[ChunkInput]
+    title: str
+    metadata: dict
+    agent: str
+    session_id: str
 
 
 def _extract_text(content) -> str:
@@ -41,9 +53,9 @@ def _is_system_content(text: str) -> bool:
     return any(stripped.startswith(pat) for pat in _SKIP_PATTERNS)
 
 
-def _build_turns(messages: list[dict]) -> list[dict]:
+def _build_turns(messages: list[dict]) -> list[ChunkInput]:
     """Build turn chunks from a list of turn records."""
-    turns = []
+    turns: list[ChunkInput] = []
 
     for record in messages:
         if record.get("type") != "turn":
@@ -74,17 +86,17 @@ def _build_turns(messages: list[dict]) -> list[dict]:
 
         if text_parts:
             turns.append(
-                {
-                    "text": "\n\n".join(text_parts),
-                    "key": f"turn-{len(turns)}",
-                    "meta": {"turn_index": len(turns)},
-                }
+                ChunkInput(
+                    text="\n\n".join(text_parts),
+                    key=f"turn-{len(turns)}",
+                    meta={"turn_index": len(turns)},
+                )
             )
 
     return turns
 
 
-def _parse_session(jsonl_path: Path) -> dict | None:
+def _parse_session(jsonl_path: Path) -> ParsedSession | None:
     """Parse a Tsugite session JSONL file into chunks."""
     records = []
     meta = {}
@@ -122,13 +134,7 @@ def _parse_session(jsonl_path: Path) -> dict | None:
     session_id = jsonl_path.stem
     title = f"{agent}: {session_id}"
 
-    return {
-        "chunks": chunks,
-        "metadata": meta,
-        "title": title,
-        "agent": agent,
-        "session_id": session_id,
-    }
+    return ParsedSession(chunks=chunks, title=title, metadata=meta, agent=agent, session_id=session_id)
 
 
 def _extract_agent_from_filename(name: str) -> str | None:
@@ -205,27 +211,23 @@ def extract(
             print(f"Error parsing {jsonl_file.name}: {e}", file=sys.stderr)
             continue
 
-        if not result or not result["chunks"]:
+        if not result or not result.chunks:
             continue
 
         # If --agent was specified but the file's meta agent doesn't match, skip
-        if agent and result["agent"] != agent:
+        if agent and result.agent != agent:
             continue
 
-        session_agent = result["agent"]
-        session_id = result["session_id"]
-        base_uri = f"tsugite://{session_agent}/{session_id}"
-
-        auto_tags = [session_agent, "conversation", "tsugite"]
-        all_tags = auto_tags + (tag or [])
+        base_uri = f"tsugite://{result.agent}/{result.session_id}"
+        all_tags = [result.agent, "conversation", "tsugite"] + (tag or [])
 
         output(
             Record(
                 source_uri=base_uri,
-                chunks=result["chunks"],
+                chunks=result.chunks,
                 tags=all_tags,
-                title=result["title"],
+                title=result.title,
                 source_type="tsugite",
-                context=json.dumps(result["metadata"]),
+                context=json.dumps(result.metadata),
             )
         )

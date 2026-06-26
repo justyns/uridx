@@ -2,14 +2,24 @@
 
 import json
 import sys
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Annotated, Optional
 
 import typer
 
-from uridx.record import Record
+from uridx.record import ChunkInput, Record
 
 from .base import filter_existing, output
+
+
+@dataclass
+class ParsedConversation:
+    """A parsed Claude Code conversation: turn chunks, title, and metadata."""
+
+    chunks: list[ChunkInput]
+    title: str
+    metadata: dict
 
 
 def _extract_content(message: dict) -> str:
@@ -36,8 +46,8 @@ def _is_tool_result(msg: dict) -> bool:
     return False
 
 
-def _build_turns(messages: list[dict]) -> list[dict]:
-    turns = []
+def _build_turns(messages: list[dict]) -> list[ChunkInput]:
+    turns: list[ChunkInput] = []
     current_user = None
     current_assistant = []
 
@@ -49,11 +59,11 @@ def _build_turns(messages: list[dict]) -> list[dict]:
             text_parts.append(f"Assistant: {' '.join(current_assistant)}")
         if text_parts:
             turns.append(
-                {
-                    "text": "\n\n".join(text_parts),
-                    "key": f"turn-{len(turns)}",
-                    "meta": {"turn_index": len(turns)},
-                }
+                ChunkInput(
+                    text="\n\n".join(text_parts),
+                    key=f"turn-{len(turns)}",
+                    meta={"turn_index": len(turns)},
+                )
             )
 
     for msg in messages:
@@ -79,7 +89,7 @@ def _build_turns(messages: list[dict]) -> list[dict]:
     return turns
 
 
-def _parse_conversation(jsonl_path: Path) -> dict | None:
+def _parse_conversation(jsonl_path: Path) -> ParsedConversation | None:
     messages = []
     metadata = {}
     first_timestamp = None
@@ -118,7 +128,7 @@ def _parse_conversation(jsonl_path: Path) -> dict | None:
     metadata["started_at"] = first_timestamp
     metadata["ended_at"] = last_timestamp
 
-    return {"chunks": chunks, "metadata": metadata, "title": title}
+    return ParsedConversation(chunks=chunks, title=title, metadata=metadata)
 
 
 def extract(
@@ -156,16 +166,16 @@ def extract(
             print(f"Error parsing {jsonl_file}: {e}", file=sys.stderr)
             continue
 
-        if not result or not result["chunks"]:
+        if not result or not result.chunks:
             continue
 
         output(
             Record(
                 source_uri=source_uri,
-                chunks=result["chunks"],
+                chunks=result.chunks,
                 tags=["claude-code", "conversation"] + (tag or []),
-                title=result["title"],
+                title=result.title,
                 source_type="claude-code",
-                context=json.dumps(result["metadata"]),
+                context=json.dumps(result.metadata),
             )
         )
