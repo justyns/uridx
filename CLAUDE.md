@@ -19,7 +19,8 @@ uv run uridx --help                  # CLI help
 
 **Data Flow**: CLI → operations.py → SQLite + sqlite-vec + FTS5
 
-- **CLI** (`cli/main.py`): Typer app with `ingest`, `search`, `stats`, `delete` commands
+- **CLI** (`cli/main.py`): Typer app with `add`, `ingest`, `search`, `stats`, `delete` commands, plus an `extract` subcommand group
+- **Ingestion model**: `extract <type> … | ingest` is the composable plumbing (extractors emit JSONL → `ingest` consumes stdin). `add <path>` is porcelain over it: it auto-detects the extractor by file extension (`cli/extract/registry.py`) and runs the same `iter_records` generators in-process. File-drop extractors (`markdown`, `pdf`, `image`, `docling`) expose `iter_records()`; structured sources (`tsugite`, `claude_code`) are `extract`-only.
 - **Search** (`search/hybrid.py`): Combines vector search (70% weight) with BM25 (30% weight) via `SearchResult` dataclass
 - **Database** (`db/`):
   - `models.py`: SQLModel tables - Item, Chunk, Tag, Setting

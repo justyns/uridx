@@ -3,12 +3,13 @@
 import json
 import re
 import sys
+from collections.abc import Iterator
 from pathlib import Path
 from typing import Annotated, Optional
 
 import typer
 
-from .base import filter_existing, get_file_mtime, output, resolve_paths
+from .base import file_uri, get_file_mtime, output, prepare_files
 
 EXTENSIONS = {".md", ".markdown"}
 MIN_CHUNK_SIZE = 100
@@ -106,23 +107,9 @@ def _parse(path: Path) -> list[dict]:
     return _merge_small_chunks(chunks)
 
 
-def extract(
-    paths: Annotated[Optional[list[Path]], typer.Argument(help="Files or directories")] = None,
-    force: Annotated[bool, typer.Option("--force", "-f", help="Re-process all files even if already ingested")] = False,
-    tag: Annotated[Optional[list[str]], typer.Option("--tag", "-t", help="Additional tags")] = None,
-):
-    """Extract markdown files, splitting by headings."""
-    # Build list of source_uris that will be generated
-    source_uri_map: dict[str, Path] = {}
-    for md_file in resolve_paths(paths or [], EXTENSIONS):
-        uri = f"file://{md_file.resolve()}"
-        source_uri_map[uri] = md_file
-
-    filter_existing(source_uri_map, force)
-    if not source_uri_map:
-        return
-
-    for source_uri, md_file in source_uri_map.items():
+def iter_records(files: list[Path], *, tag: Optional[list[str]] = None) -> Iterator[dict]:
+    """Yield ingest records for markdown files, splitting by headings."""
+    for md_file in files:
         try:
             chunks = _parse(md_file)
         except Exception as e:
@@ -132,15 +119,23 @@ def extract(
         if not chunks:
             continue
 
-        output(
-            {
-                "source_uri": source_uri,
-                "chunks": chunks,
-                "tags": ["markdown", "document"] + (tag or []),
-                "title": md_file.stem,
-                "source_type": "markdown",
-                "context": json.dumps({"path": str(md_file)}),
-                "replace": True,
-                "created_at": get_file_mtime(md_file),
-            }
-        )
+        yield {
+            "source_uri": file_uri(md_file),
+            "chunks": chunks,
+            "tags": ["markdown", "document"] + (tag or []),
+            "title": md_file.stem,
+            "source_type": "markdown",
+            "context": json.dumps({"path": str(md_file)}),
+            "replace": True,
+            "created_at": get_file_mtime(md_file),
+        }
+
+
+def extract(
+    paths: Annotated[Optional[list[Path]], typer.Argument(help="Files or directories")] = None,
+    force: Annotated[bool, typer.Option("--force", "-f", help="Re-process all files even if already ingested")] = False,
+    tag: Annotated[Optional[list[str]], typer.Option("--tag", "-t", help="Additional tags")] = None,
+):
+    """Extract markdown files, splitting by headings."""
+    for rec in iter_records(prepare_files(paths or [], EXTENSIONS, force), tag=tag):
+        output(rec)
