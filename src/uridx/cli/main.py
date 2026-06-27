@@ -52,7 +52,7 @@ def _indent(text: str, prefix: str = "  ") -> str:
 def search(
     query: str,
     tag: Annotated[Optional[list[str]], typer.Option("--tag", "-t")] = None,
-    type: Annotated[Optional[str], typer.Option("--type")] = None,
+    source_type: Annotated[Optional[str], typer.Option("--type")] = None,
     limit: Annotated[int, typer.Option("--limit", "-n")] = 10,
     json_output: Annotated[bool, typer.Option("--json", "-j")] = False,
     full: Annotated[
@@ -68,7 +68,7 @@ def search(
     results = hybrid_search(
         query,
         limit=limit,
-        source_type=type,
+        source_type=source_type,
         tags=tag,
         semantic=semantic,
         recency_boost=recency_boost,
