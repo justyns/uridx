@@ -50,7 +50,7 @@ def _indent(text: str, prefix: str = "  ") -> str:
 
 @app.command()
 def search(
-    query: str,
+    query: Annotated[str, typer.Argument(help="Search text; leave empty to list items matching the filters")] = "",
     tag: Annotated[Optional[list[str]], typer.Option("--tag", "-t")] = None,
     source_type: Annotated[Optional[str], typer.Option("--type")] = None,
     limit: Annotated[int, typer.Option("--limit", "-n")] = 10,
