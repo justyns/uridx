@@ -30,7 +30,7 @@ from .base import split_text
 MAX_CHARS = 2000
 
 _ID_RE = re.compile(r"<([^>]+)>")
-_RE_PREFIX = re.compile(r"^(?:re|fwd?|aw|sv)\s*:\s*", re.IGNORECASE)
+_RE_PREFIX = re.compile(r"^(?:(?:re|fwd?|aw|sv)\s*:\s*)+", re.IGNORECASE)
 _DURATION_RE = re.compile(r"^(\d+)\s*([smhdw])$", re.IGNORECASE)
 _UNIT_SECONDS = {"s": 1, "m": 60, "h": 3600, "d": 86400, "w": 604800}
 
@@ -115,7 +115,7 @@ def _strip_html(raw: str) -> str:
     parser = _HTMLTextExtractor()
     parser.feed(raw)
     parser.close()
-    return "\n".join(line for line in (ln.strip() for ln in parser.get_text().splitlines()) if line)
+    return "\n".join(s for ln in parser.get_text().splitlines() if (s := ln.strip()))
 
 
 def _body_text(msg: EmailMessage) -> tuple[str, list[str]]:
@@ -150,16 +150,29 @@ def parse_message(msg: EmailMessage, folder: str) -> Msg:
     from_addr = str(msg.get("From") or "")
     subject = str(msg.get("Subject") or "")
     raw_date = msg.get("Date")
+    body, attachments = _body_text(msg)
     ids = _ids(msg.get("Message-Id"))
     if ids:
         message_id = ids[0]
     else:
-        seed = f"{from_addr}|{raw_date or ''}|{subject}".encode()
+        seed = json.dumps(
+            {
+                "from": from_addr,
+                "date": raw_date or "",
+                "subject": subject,
+                "to": str(msg.get("To") or ""),
+                "cc": str(msg.get("Cc") or ""),
+                "folder": folder,
+                "body": body,
+                "attachments": attachments,
+            },
+            ensure_ascii=False,
+            sort_keys=True,
+        ).encode()
         message_id = f"synth-{hashlib.sha256(seed).hexdigest()[:16]}@uridx"
     # Thread anchor: the earliest referenced ancestor (References is root-first), so every
     # message in a conversation derives the same id without needing to see its siblings.
     refs = _ids(msg.get("References")) or _ids(msg.get("In-Reply-To"))
-    body, attachments = _body_text(msg)
     return Msg(
         message_id=message_id,
         thread_id=refs[0] if refs else message_id,
@@ -176,10 +189,7 @@ def parse_message(msg: EmailMessage, folder: str) -> Msg:
 
 
 def _clean_subject(subject: str) -> str:
-    s = subject.strip()
-    while (stripped := _RE_PREFIX.sub("", s, count=1).strip()) != s:
-        s = stripped
-    return s
+    return _RE_PREFIX.sub("", subject.strip()).strip()
 
 
 def _message_chunks(m: Msg) -> list[ChunkInput]:
@@ -199,6 +209,7 @@ def _message_chunks(m: Msg) -> list[ChunkInput]:
 
 def build_message_record(m: Msg, *, account: str, junk_signals: set[str], user_tags: list[str]) -> Record:
     title = _clean_subject(m.subject)
+    junk = sorted(junk_signals)
     context = {
         "subject": title,
         "from": m.from_addr,
@@ -210,9 +221,9 @@ def build_message_record(m: Msg, *, account: str, junk_signals: set[str], user_t
         "message_id": m.message_id,
         "thread_id": m.thread_id,
         "attachments": m.attachments,
-        "junk": sorted(junk_signals),
+        "junk": junk,
     }
-    tags = list(dict.fromkeys(["email", account, m.folder, f"thread:{m.thread_id}", *user_tags, *sorted(junk_signals)]))
+    tags = list(dict.fromkeys(["email", account, m.folder, f"thread:{m.thread_id}", *user_tags, *junk]))
     return Record(
         source_uri=f"email://{account}/{m.message_id}",
         chunks=_message_chunks(m),
@@ -256,7 +267,7 @@ def parse_since(value: str | None) -> datetime | None:
     return dt.replace(tzinfo=timezone.utc)
 
 
-def parse_duration(value: str | None) -> float | None:
+def parse_duration(value: str | None) -> int | None:
     """Parse a duration like 30m / 2h / 7d / 1w into seconds (None if unset)."""
     if not value:
         return None
