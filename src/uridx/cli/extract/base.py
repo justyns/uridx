@@ -69,3 +69,32 @@ def filter_existing_files(files: list[Path], force: bool) -> list[Path]:
 def prepare_files(paths: list[Path], extensions: set[str], force: bool) -> list[Path]:
     """Resolve paths to matching files, dropping already-ingested ones (unless force)."""
     return filter_existing_files(resolve_paths(paths, extensions), force)
+
+
+def split_text(text: str, max_chars: int) -> list[str]:
+    """Split text into chunks of at most max_chars, breaking on paragraph boundaries.
+
+    Paragraphs (split on blank lines) are packed up to max_chars; a single paragraph
+    longer than max_chars is hard-split. Empty input yields an empty list.
+    """
+    text = text.strip()
+    if len(text) <= max_chars:
+        return [text] if text else []
+
+    chunks: list[str] = []
+    buf = ""
+    for para in text.split("\n\n"):
+        if len(para) > max_chars:
+            if buf:
+                chunks.append(buf)
+                buf = ""
+            chunks.extend(para[i : i + max_chars] for i in range(0, len(para), max_chars))
+        elif len(buf) + len(para) + 2 > max_chars:
+            if buf:
+                chunks.append(buf)
+            buf = para
+        else:
+            buf = f"{buf}\n\n{para}" if buf else para
+    if buf:
+        chunks.append(buf)
+    return chunks

@@ -38,6 +38,55 @@ def _rrf(result_lists: list[list[tuple[int, float]]], k: int = 60) -> list[tuple
     return sorted(fused.items(), key=lambda x: x[1], reverse=True)
 
 
+def _load_tags(session, item_ids: set[int]) -> dict[int, list[str]]:
+    """Map each item_id to its list of tags."""
+    tags_by_item: dict[int, list[str]] = {}
+    for t in session.exec(select(Tag).where(Tag.item_id.in_(item_ids))).all():
+        tags_by_item.setdefault(t.item_id, []).append(t.tag)
+    return tags_by_item
+
+
+def _list_results(
+    *,
+    limit: int,
+    source_type: str | None,
+    tags: list[str] | None,
+    source_prefix: str | None,
+    after: datetime | None,
+) -> list[SearchResult]:
+    """Empty-query listing: items matching the filters, newest first, unranked.
+
+    Lets `search` browse a slice of the index (e.g. a whole thread via
+    `--tag thread:<id>`) without a ranking query.
+    """
+    with get_session() as session:
+        stmt = select(Chunk, Item).join(Item, Chunk.item_id == Item.id).where(Chunk.chunk_index == 0)
+        if source_type:
+            stmt = stmt.where(Item.source_type == source_type)
+        if source_prefix:
+            stmt = stmt.where(Item.source_uri.startswith(source_prefix))
+        if after:
+            stmt = stmt.where(Item.created_at >= after)
+        for t in tags or []:
+            stmt = stmt.where(Item.id.in_(select(Tag.item_id).where(Tag.tag == t)))
+        stmt = stmt.order_by(Item.created_at.desc()).limit(limit)
+        rows = session.exec(stmt).all()
+        tags_by_item = _load_tags(session, {item.id for _, item in rows})
+
+        return [
+            SearchResult(
+                source_uri=item.source_uri,
+                title=item.title,
+                source_type=item.source_type,
+                chunk_text=chunk.text,
+                score=0.0,
+                tags=tags_by_item.get(item.id, []),
+                created_at=item.created_at,
+            )
+            for chunk, item in rows
+        ]
+
+
 def _fts_search(cursor, fts_query: str, limit: int) -> list[tuple[int, float]]:
     if not fts_query:
         return []
@@ -61,6 +110,9 @@ def hybrid_search(
 ) -> list[SearchResult]:
     if min_score is None:
         min_score = URIDX_MIN_SCORE
+
+    if not query.strip():
+        return _list_results(limit=limit, source_type=source_type, tags=tags, source_prefix=source_prefix, after=after)
 
     conn = get_raw_connection()
     cursor = conn.cursor()
@@ -101,11 +153,7 @@ def hybrid_search(
             stmt = stmt.where(Item.created_at >= after)
 
         results_data = session.exec(stmt).all()
-
-        item_ids = {item.id for _, item in results_data}
-        tags_by_item: dict[int, list[str]] = {}
-        for t in session.exec(select(Tag).where(Tag.item_id.in_(item_ids))).all():
-            tags_by_item.setdefault(t.item_id, []).append(t.tag)
+        tags_by_item = _load_tags(session, {item.id for _, item in results_data})
 
         results = []
         for chunk, item in results_data:
