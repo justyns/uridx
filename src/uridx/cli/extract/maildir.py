@@ -17,7 +17,9 @@ def _iter_messages(
     root: Path, folder_filter: Optional[str], cutoff_mtime: Optional[float]
 ) -> Iterator[tuple[EmailMessage, str]]:
     """Yield (message, folder) for every Maildir message under root's cur/ and new/."""
-    for f in sorted(p for p in root.rglob("*") if p.is_file() and p.parent.name in ("cur", "new")):
+    for f in root.rglob("*"):
+        if not f.is_file() or f.parent.name not in ("cur", "new"):
+            continue
         if cutoff_mtime is not None and f.stat().st_mtime < cutoff_mtime:
             continue
         rel = f.parent.parent.relative_to(root)
