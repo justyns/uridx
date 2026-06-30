@@ -11,7 +11,6 @@ Not named `email.py` — that would shadow the stdlib `email` package.
 
 import email
 import hashlib
-import html
 import json
 import re
 import sys
@@ -22,6 +21,7 @@ from email import policy
 from email.message import EmailMessage
 from email.utils import parsedate_to_datetime
 from enum import Enum
+from html.parser import HTMLParser
 
 from uridx.record import ChunkInput, Record
 
@@ -31,8 +31,6 @@ MAX_CHARS = 2000
 
 _ID_RE = re.compile(r"<([^>]+)>")
 _RE_PREFIX = re.compile(r"^(?:re|fwd?|aw|sv)\s*:\s*", re.IGNORECASE)
-_TAG_RE = re.compile(r"<[^>]+>")
-_SCRIPT_STYLE_RE = re.compile(r"<(script|style)\b[^>]*>.*?</\1>", re.IGNORECASE | re.DOTALL)
 _DURATION_RE = re.compile(r"^(\d+)\s*([smhdw])$", re.IGNORECASE)
 _UNIT_SECONDS = {"s": 1, "m": 60, "h": 3600, "d": 86400, "w": 604800}
 
@@ -89,11 +87,35 @@ def classify_junk(msg: EmailMessage) -> set[str]:
     return signals
 
 
+class _HTMLTextExtractor(HTMLParser):
+    """Collect visible text from HTML, skipping <script>/<style> (convert_charrefs decodes entities)."""
+
+    def __init__(self) -> None:
+        super().__init__(convert_charrefs=True)
+        self._skip = 0
+        self._parts: list[str] = []
+
+    def handle_starttag(self, tag, attrs):
+        if tag in ("script", "style"):
+            self._skip += 1
+
+    def handle_endtag(self, tag):
+        if tag in ("script", "style") and self._skip:
+            self._skip -= 1
+
+    def handle_data(self, data):
+        if not self._skip:
+            self._parts.append(data)
+
+    def get_text(self) -> str:
+        return "".join(self._parts)
+
+
 def _strip_html(raw: str) -> str:
-    raw = _SCRIPT_STYLE_RE.sub(" ", raw)
-    raw = _TAG_RE.sub(" ", raw)
-    raw = html.unescape(raw)
-    return "\n".join(line for line in (ln.strip() for ln in raw.splitlines()) if line)
+    parser = _HTMLTextExtractor()
+    parser.feed(raw)
+    parser.close()
+    return "\n".join(line for line in (ln.strip() for ln in parser.get_text().splitlines()) if line)
 
 
 def _body_text(msg: EmailMessage) -> tuple[str, list[str]]:

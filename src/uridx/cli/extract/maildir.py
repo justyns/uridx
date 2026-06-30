@@ -17,6 +17,9 @@ def _iter_messages(
     root: Path, folder_filter: Optional[str], cutoff_mtime: Optional[float]
 ) -> Iterator[tuple[EmailMessage, str]]:
     """Yield (message, folder) for every Maildir message under root's cur/ and new/."""
+    # Walk cur/new ourselves rather than mailbox.Maildir: its folder API assumes Maildir++
+    # (.dot-prefixed) names and misses mbsync's verbatim nested folders, and it yields legacy
+    # message objects instead of letting us parse with email.policy.default.
     for f in root.rglob("*"):
         if not f.is_file() or f.parent.name not in ("cur", "new"):
             continue
