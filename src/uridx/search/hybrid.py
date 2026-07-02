@@ -46,6 +46,17 @@ def _load_tags(session, item_ids: set[int]) -> dict[int, list[str]]:
     return tags_by_item
 
 
+def _apply_item_filters(stmt, source_type: str | None, source_prefix: str | None, after: datetime | None):
+    """Apply the shared source_type / source_prefix / after WHERE clauses to a Chunk+Item select."""
+    if source_type:
+        stmt = stmt.where(Item.source_type == source_type)
+    if source_prefix:
+        stmt = stmt.where(Item.source_uri.startswith(source_prefix))
+    if after:
+        stmt = stmt.where(Item.created_at >= after)
+    return stmt
+
+
 def _list_results(
     *,
     limit: int,
@@ -61,12 +72,7 @@ def _list_results(
     """
     with get_session() as session:
         stmt = select(Chunk, Item).join(Item, Chunk.item_id == Item.id).where(Chunk.chunk_index == 0)
-        if source_type:
-            stmt = stmt.where(Item.source_type == source_type)
-        if source_prefix:
-            stmt = stmt.where(Item.source_uri.startswith(source_prefix))
-        if after:
-            stmt = stmt.where(Item.created_at >= after)
+        stmt = _apply_item_filters(stmt, source_type, source_prefix, after)
         for t in tags or []:
             stmt = stmt.where(Item.id.in_(select(Tag.item_id).where(Tag.tag == t)))
         stmt = stmt.order_by(Item.created_at.desc()).limit(limit)
@@ -144,13 +150,7 @@ def hybrid_search(
 
     with get_session() as session:
         stmt = select(Chunk, Item).join(Item, Chunk.item_id == Item.id).where(Chunk.id.in_(chunk_ids))
-
-        if source_type:
-            stmt = stmt.where(Item.source_type == source_type)
-        if source_prefix:
-            stmt = stmt.where(Item.source_uri.startswith(source_prefix))
-        if after:
-            stmt = stmt.where(Item.created_at >= after)
+        stmt = _apply_item_filters(stmt, source_type, source_prefix, after)
 
         results_data = session.exec(stmt).all()
         tags_by_item = _load_tags(session, {item.id for _, item in results_data})
