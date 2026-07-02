@@ -41,7 +41,7 @@ def process_query(query: str) -> str:
     keywords = list(dict.fromkeys(w for w in words if w not in STOP_WORDS and len(w) >= 2))
 
     if keywords:
-        return " OR ".join(keywords)
+        return " OR ".join(f'"{kw}"' for kw in keywords)
 
     safe = _FTS_SPECIAL.sub("", query).strip()
     return f'"{safe}"' if safe else ""
