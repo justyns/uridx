@@ -38,6 +38,67 @@ def _rrf(result_lists: list[list[tuple[int, float]]], k: int = 60) -> list[tuple
     return sorted(fused.items(), key=lambda x: x[1], reverse=True)
 
 
+def _load_tags(session, item_ids: set[int]) -> dict[int, list[str]]:
+    """Map each item_id to its list of tags."""
+    tags_by_item: dict[int, list[str]] = {}
+    for t in session.exec(select(Tag).where(Tag.item_id.in_(item_ids))).all():
+        tags_by_item.setdefault(t.item_id, []).append(t.tag)
+    return tags_by_item
+
+
+def _apply_item_filters(
+    stmt,
+    source_type: str | None,
+    source_prefix: str | None,
+    after: datetime | None,
+    tags: list[str] | None = None,
+):
+    """Apply the shared source_type / source_prefix / after / tags WHERE clauses to a Chunk+Item select."""
+    if source_type:
+        stmt = stmt.where(Item.source_type == source_type)
+    if source_prefix:
+        stmt = stmt.where(Item.source_uri.startswith(source_prefix))
+    if after:
+        stmt = stmt.where(Item.created_at >= after)
+    for t in tags or []:
+        stmt = stmt.where(Item.id.in_(select(Tag.item_id).where(Tag.tag == t)))
+    return stmt
+
+
+def _list_results(
+    *,
+    limit: int,
+    source_type: str | None,
+    tags: list[str] | None,
+    source_prefix: str | None,
+    after: datetime | None,
+) -> list[SearchResult]:
+    """Empty-query listing: items matching the filters, newest first, unranked.
+
+    Lets `search` browse a slice of the index (e.g. a whole thread via
+    `--tag thread:<id>`) without a ranking query.
+    """
+    with get_session() as session:
+        stmt = select(Chunk, Item).join(Item, Chunk.item_id == Item.id).where(Chunk.chunk_index == 0)
+        stmt = _apply_item_filters(stmt, source_type, source_prefix, after, tags)
+        stmt = stmt.order_by(Item.created_at.desc()).limit(limit)
+        rows = session.exec(stmt).all()
+        tags_by_item = _load_tags(session, {item.id for _, item in rows})
+
+        return [
+            SearchResult(
+                source_uri=item.source_uri,
+                title=item.title,
+                source_type=item.source_type,
+                chunk_text=chunk.text,
+                score=0.0,
+                tags=tags_by_item.get(item.id, []),
+                created_at=item.created_at,
+            )
+            for chunk, item in rows
+        ]
+
+
 def _fts_search(cursor, fts_query: str, limit: int) -> list[tuple[int, float]]:
     if not fts_query:
         return []
@@ -61,6 +122,9 @@ def hybrid_search(
 ) -> list[SearchResult]:
     if min_score is None:
         min_score = URIDX_MIN_SCORE
+
+    if not query.strip():
+        return _list_results(limit=limit, source_type=source_type, tags=tags, source_prefix=source_prefix, after=after)
 
     conn = get_raw_connection()
     cursor = conn.cursor()
@@ -92,37 +156,23 @@ def hybrid_search(
 
     with get_session() as session:
         stmt = select(Chunk, Item).join(Item, Chunk.item_id == Item.id).where(Chunk.id.in_(chunk_ids))
-
-        if source_type:
-            stmt = stmt.where(Item.source_type == source_type)
-        if source_prefix:
-            stmt = stmt.where(Item.source_uri.startswith(source_prefix))
-        if after:
-            stmt = stmt.where(Item.created_at >= after)
+        stmt = _apply_item_filters(stmt, source_type, source_prefix, after, tags)
 
         results_data = session.exec(stmt).all()
+        tags_by_item = _load_tags(session, {item.id for _, item in results_data})
 
-        item_ids = {item.id for _, item in results_data}
-        tags_by_item: dict[int, list[str]] = {}
-        for t in session.exec(select(Tag).where(Tag.item_id.in_(item_ids))).all():
-            tags_by_item.setdefault(t.item_id, []).append(t.tag)
-
-        results = []
-        for chunk, item in results_data:
-            item_tags = tags_by_item.get(item.id, [])
-            if tags and not all(t in item_tags for t in tags):
-                continue
-            results.append(
-                SearchResult(
-                    source_uri=item.source_uri,
-                    title=item.title,
-                    source_type=item.source_type,
-                    chunk_text=chunk.text,
-                    score=score_map.get(chunk.id, 0.0),
-                    tags=item_tags,
-                    created_at=item.created_at,
-                )
+        results = [
+            SearchResult(
+                source_uri=item.source_uri,
+                title=item.title,
+                source_type=item.source_type,
+                chunk_text=chunk.text,
+                score=score_map.get(chunk.id, 0.0),
+                tags=tags_by_item.get(item.id, []),
+                created_at=item.created_at,
             )
+            for chunk, item in results_data
+        ]
 
         if recency_boost > 0 and results:
             now = datetime.now(timezone.utc)

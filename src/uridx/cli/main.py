@@ -13,15 +13,16 @@ from uridx.cli.extract import app as extract_app
 from uridx.cli.extract.base import MissingExtractorDependency, filter_existing_files
 from uridx.cli.extract.registry import load_extractor, resolve_dispatch
 from uridx.config import get_machine_id
-from uridx.db.engine import init_db
+from uridx.db.engine import init_db, require_embed_model_match
 from uridx.db.operations import (
     add_item,
     delete_item,
     delete_items_by_prefix,
     get_item,
     get_stats,
-    ingest_record,
+    ingest_records,
     list_items_by_prefix,
+    reindex_embeddings,
 )
 from uridx.record import ChunkInput, Record
 from uridx.search.hybrid import hybrid_search
@@ -30,6 +31,16 @@ app = typer.Typer()
 app.add_typer(extract_app, name="extract")
 
 SNIPPET_LIMIT = 400
+
+
+def _progress(console: Console) -> Progress:
+    return Progress(
+        SpinnerColumn(),
+        TextColumn("[progress.description]{task.description}"),
+        BarColumn(),
+        MofNCompleteColumn(),
+        console=console,
+    )
 
 
 def _snippet(text: str, limit: int = SNIPPET_LIMIT) -> str:
@@ -50,7 +61,7 @@ def _indent(text: str, prefix: str = "  ") -> str:
 
 @app.command()
 def search(
-    query: str,
+    query: Annotated[str, typer.Argument(help="Search text; leave empty to list items matching the filters")] = "",
     tag: Annotated[Optional[list[str]], typer.Option("--tag", "-t")] = None,
     source_type: Annotated[Optional[str], typer.Option("--type")] = None,
     limit: Annotated[int, typer.Option("--limit", "-n")] = 10,
@@ -65,6 +76,8 @@ def search(
     after: Annotated[Optional[datetime], typer.Option("--after")] = None,
 ):
     init_db()
+    if semantic and query.strip():
+        require_embed_model_match()
     results = hybrid_search(
         query,
         limit=limit,
@@ -105,12 +118,13 @@ def ingest(
     tag: Annotated[Optional[list[str]], typer.Option("--tag", "-t", help="Tags for ingested items")] = None,
 ):
     init_db()
+    require_embed_model_match()
     console = Console(stderr=True)
 
     if text:
         content = sys.stdin.read()
         with console.status(f"Ingesting {text}..."):
-            item = add_item(
+            item, _ = add_item(
                 source_uri=text,
                 chunks=[ChunkInput(text=content)],
                 tags=tag,
@@ -118,27 +132,25 @@ def ingest(
             )
         print(json.dumps({"source_uri": item.source_uri, "chunks": len(item.chunks)}))
     else:
-        lines = [line.strip() for line in sys.stdin if line.strip()]
-        count = 0
-        with Progress(
-            SpinnerColumn(),
-            TextColumn("[progress.description]{task.description}"),
-            BarColumn(),
-            MofNCompleteColumn(),
-            console=console,
-        ) as progress:
-            task = progress.add_task("Ingesting...", total=len(lines))
-            for i, line in enumerate(lines, 1):
+
+        def read_records():
+            for i, line in enumerate(sys.stdin, 1):
+                if not (line := line.strip()):
+                    continue
                 try:
-                    record = Record.model_validate_json(line)
+                    yield Record.model_validate_json(line)
                 except ValidationError as e:
                     print(f"Error: invalid record on line {i}:\n{e}", file=sys.stderr)
                     raise typer.Exit(1)
-                progress.update(task, description=f"{record.source_uri[:60]}")
-                ingest_record(record, extra_tags=tag)
-                count += 1
-                progress.advance(task)
-        print(json.dumps({"ingested": count}))
+
+        with _progress(console) as progress:
+            task = progress.add_task("Ingesting...", total=None)
+            counts = ingest_records(
+                read_records(),
+                extra_tags=tag,
+                on_result=lambda rec, _: progress.update(task, description=rec.source_uri[:60], advance=1),
+            )
+        print(json.dumps({"ingested": counts["added"], "unchanged": counts["unchanged"], "merged": counts["merged"]}))
 
 
 @app.command()
@@ -179,6 +191,7 @@ def add(
         return
 
     init_db()
+    require_embed_model_match()
     console = Console(stderr=True)
 
     # Pre-filter each bucket so already-indexed files are dropped (and reported) before any heavy work.
@@ -192,21 +205,19 @@ def add(
 
     ingested = 0
     by_type: dict[str, int] = {}
-    with Progress(
-        SpinnerColumn(),
-        TextColumn("[progress.description]{task.description}"),
-        console=console,
-    ) as progress:
+    with _progress(console) as progress:
         task = progress.add_task("Adding...", total=None)
         for name, survivors in plan:
             module = load_extractor(name)
+
+            def on_result(rec, _status, name=name):
+                stype = rec.source_type or name
+                by_type[stype] = by_type.get(stype, 0) + 1
+                progress.update(task, description=f"{name}: {rec.source_uri[:50]}", advance=1)
+
             try:
-                for rec in module.iter_records(survivors, tag=tag):
-                    ingest_record(rec)
-                    ingested += 1
-                    stype = rec.source_type or name
-                    by_type[stype] = by_type.get(stype, 0) + 1
-                    progress.update(task, description=f"{name}: {rec.source_uri[:50]}")
+                counts = ingest_records(module.iter_records(survivors, tag=tag), on_result=on_result)
+                ingested += counts["added"]
             except MissingExtractorDependency as e:
                 print(f"Skipping {name}: {e}", file=sys.stderr)
 
@@ -263,6 +274,24 @@ def delete(
 def stats():
     init_db()
     print(json.dumps(get_stats(), indent=2))
+
+
+@app.command()
+def reindex():
+    """Re-embed all chunks with the current embedding backend/model.
+
+    Rebuilds only the vector table (at the new model's dimension) from chunk text
+    already in the DB — no re-extraction needed. Use after changing URIDX_EMBEDDINGS,
+    FASTEMBED_MODEL, or OLLAMA_EMBED_MODEL.
+    """
+    init_db()
+    console = Console(stderr=True)
+    with _progress(console) as progress:
+        task = progress.add_task("Reindexing...", total=None)
+        count = reindex_embeddings(
+            on_progress=lambda done, total: progress.update(task, completed=done, total=total),
+        )
+    print(json.dumps({"reindexed": count}))
 
 
 if __name__ == "__main__":

@@ -9,7 +9,7 @@ from importlib.metadata import entry_points
 
 import typer
 
-from . import claude_code, docling, image, markdown, pdf, tsugite
+from . import claude_code, docling, image, maildir, markdown, mbox, pdf, tsugite
 
 app = typer.Typer(help="Extract content to JSONL for ingestion")
 
@@ -19,6 +19,8 @@ app.command("markdown")(markdown.extract)
 app.command("pdf")(pdf.extract)
 app.command("image")(image.extract)
 app.command("tsugite")(tsugite.extract)
+app.command("maildir")(maildir.extract)
+app.command("mbox")(mbox.extract)
 
 
 def load_plugins():

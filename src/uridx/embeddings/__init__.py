@@ -18,6 +18,13 @@ def _backend():
     return fastembed, (FASTEMBED_MODEL,)
 
 
+def get_model_id() -> str:
+    """Identity of the configured embedding model, e.g. 'ollama:qwen3-embedding:0.6b'."""
+    if URIDX_EMBEDDINGS == "ollama":
+        return f"ollama:{OLLAMA_EMBED_MODEL}"
+    return f"fastembed:{FASTEMBED_MODEL}"
+
+
 def get_dimension() -> int:
     mod, args = _backend()
     return mod.get_dimension(*args)

@@ -1,4 +1,5 @@
 import sqlite3
+import sys
 from pathlib import Path
 
 import sqlite_vec
@@ -6,7 +7,7 @@ from sqlmodel import Session, SQLModel, create_engine
 
 from uridx.config import URIDX_DB_PATH
 from uridx.db.models import Setting
-from uridx.embeddings import get_dimension
+from uridx.embeddings import get_dimension, get_model_id
 
 _engine = None
 
@@ -73,6 +74,18 @@ def _ensure_fts_table(cursor):
             cursor.execute("INSERT INTO chunks_fts(rowid, text) SELECT id, text FROM chunk")
 
 
+def create_embeddings_table(cursor, dim: int) -> None:
+    """Create the vec0 virtual table — the one definition of the vector schema."""
+    cursor.execute(
+        f"""
+        CREATE VIRTUAL TABLE chunk_embeddings USING vec0(
+            chunk_id INTEGER PRIMARY KEY,
+            embedding float[{dim}]
+        )
+        """
+    )
+
+
 def _set_sqlite_pragmas(dbapi_conn, connection_record):
     cursor = dbapi_conn.cursor()
     cursor.execute("PRAGMA journal_mode=WAL")
@@ -122,6 +135,24 @@ def get_session() -> Session:
 _db_initialized = False
 
 
+def require_embed_model_match():
+    """Exit if the configured embedding model differs from the one the index was
+    embedded with. Called by commands that read or write vectors; `reindex` (the fix)
+    and vector-free commands like stats/delete skip it."""
+    with get_session() as session:
+        stored = session.get(Setting, "embed_model")
+    model_id = get_model_id()
+    if stored and stored.value != model_id:
+        print(
+            f"Error: this index was embedded with {stored.value}, "
+            f"but the current config is {model_id}.\n"
+            "Run `uridx reindex` to re-embed the index, or restore the original "
+            "URIDX_EMBEDDINGS / FASTEMBED_MODEL / OLLAMA_EMBED_MODEL settings.",
+            file=sys.stderr,
+        )
+        raise SystemExit(1)
+
+
 def init_db():
     global _db_initialized
     if _db_initialized:
@@ -138,14 +169,20 @@ def init_db():
             session.add(Setting(key="embed_dimension", value=str(embed_dim)))
             session.commit()
 
+        if session.get(Setting, "embed_model") is None:
+            session.add(Setting(key="embed_model", value=get_model_id()))
+            session.commit()
+
     conn = get_raw_connection()
     cursor = conn.cursor()
 
-    # Migration: add content_hash column if missing
+    # Migration: add content_hash column if missing (older DBs also lack its index,
+    # since create_all only indexes tables it creates)
     cursor.execute("PRAGMA table_info(item)")
     columns = [row[1] for row in cursor.fetchall()]
     if "content_hash" not in columns:
         cursor.execute("ALTER TABLE item ADD COLUMN content_hash TEXT")
+    cursor.execute("CREATE INDEX IF NOT EXISTS ix_item_content_hash ON item (content_hash)")
 
     # Migration: populate location table for existing items without locations
     # SQLModel creates the table, but we need to populate it for pre-existing items
@@ -157,14 +194,7 @@ def init_db():
 
     cursor.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='chunk_embeddings'")
     if not cursor.fetchone():
-        cursor.execute(
-            f"""
-            CREATE VIRTUAL TABLE chunk_embeddings USING vec0(
-                chunk_id INTEGER PRIMARY KEY,
-                embedding float[{embed_dim}]
-            )
-            """
-        )
+        create_embeddings_table(cursor, embed_dim)
 
     _ensure_fts_table(cursor)
 
