@@ -29,7 +29,7 @@ def get_file_mtime(path: Path) -> str:
 
 def output(record: Record) -> None:
     """Print a record as one JSONL line (omitting unset/None fields)."""
-    print(record.model_dump_json(exclude_none=True))
+    print(record.model_dump_json(exclude_none=True), flush=True)
 
 
 def resolve_paths(paths: list[Path], extensions: set[str]) -> list[Path]:

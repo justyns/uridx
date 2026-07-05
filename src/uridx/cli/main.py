@@ -118,7 +118,6 @@ def ingest(
             )
         print(json.dumps({"source_uri": item.source_uri, "chunks": len(item.chunks)}))
     else:
-        lines = [line.strip() for line in sys.stdin if line.strip()]
         count = 0
         with Progress(
             SpinnerColumn(),
@@ -127,8 +126,10 @@ def ingest(
             MofNCompleteColumn(),
             console=console,
         ) as progress:
-            task = progress.add_task("Ingesting...", total=len(lines))
-            for i, line in enumerate(lines, 1):
+            task = progress.add_task("Ingesting...", total=None)
+            for i, line in enumerate(sys.stdin, 1):
+                if not (line := line.strip()):
+                    continue
                 try:
                     record = Record.model_validate_json(line)
                 except ValidationError as e:
