@@ -16,6 +16,7 @@ from uridx.config import get_machine_id
 from uridx.db.engine import init_db
 from uridx.db.operations import (
     add_item,
+    content_hash_exists,
     delete_item,
     delete_items_by_prefix,
     get_item,
@@ -23,6 +24,7 @@ from uridx.db.operations import (
     ingest_record,
     list_items_by_prefix,
 )
+from uridx.embeddings import get_embeddings_sync
 from uridx.record import ChunkInput, Record
 from uridx.search.hybrid import hybrid_search
 
@@ -30,6 +32,7 @@ app = typer.Typer()
 app.add_typer(extract_app, name="extract")
 
 SNIPPET_LIMIT = 400
+EMBED_BATCH_CHUNKS = 64
 
 
 def _snippet(text: str, limit: int = SNIPPET_LIMIT) -> str:
@@ -119,6 +122,9 @@ def ingest(
         print(json.dumps({"source_uri": item.source_uri, "chunks": len(item.chunks)}))
     else:
         counts = {"added": 0, "unchanged": 0, "merged": 0}
+        batch: list[Record] = []
+        batch_chunks = 0
+
         with Progress(
             SpinnerColumn(),
             TextColumn("[progress.description]{task.description}"),
@@ -127,18 +133,42 @@ def ingest(
             console=console,
         ) as progress:
             task = progress.add_task("Ingesting...", total=None)
+
+            def flush():
+                """Embed all buffered chunks in one call, then ingest each record."""
+                nonlocal batch_chunks
+                if not batch:
+                    return
+                embs = get_embeddings_sync([c.text for rec in batch for c in rec.chunks])
+                pos = 0
+                for rec in batch:
+                    _, status = ingest_record(rec, extra_tags=tag, embeddings=embs[pos : pos + len(rec.chunks)])
+                    pos += len(rec.chunks)
+                    counts[status] += 1
+                    progress.advance(task)
+                batch.clear()
+                batch_chunks = 0
+
             for i, line in enumerate(sys.stdin, 1):
                 if not (line := line.strip()):
                     continue
                 try:
                     record = Record.model_validate_json(line)
                 except ValidationError as e:
+                    flush()
                     print(f"Error: invalid record on line {i}:\n{e}", file=sys.stderr)
                     raise typer.Exit(1)
                 progress.update(task, description=f"{record.source_uri[:60]}")
-                _, status = ingest_record(record, extra_tags=tag)
-                counts[status] += 1
-                progress.advance(task)
+                if content_hash_exists(record.chunks):
+                    _, status = ingest_record(record, extra_tags=tag)
+                    counts[status] += 1
+                    progress.advance(task)
+                else:
+                    batch.append(record)
+                    batch_chunks += len(record.chunks)
+                    if batch_chunks >= EMBED_BATCH_CHUNKS:
+                        flush()
+            flush()
         print(json.dumps({"ingested": counts["added"], "unchanged": counts["unchanged"], "merged": counts["merged"]}))
 
 

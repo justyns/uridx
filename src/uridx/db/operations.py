@@ -46,6 +46,13 @@ def _detach_item(session, item: Item) -> Item:
     return item
 
 
+def content_hash_exists(chunks: list[ChunkInput]) -> bool:
+    """True if this content already exists — add_item would skip or merge without embedding."""
+    with get_session() as session:
+        h = compute_content_hash(chunks)
+        return session.exec(select(Item.id).where(Item.content_hash == h)).first() is not None
+
+
 def add_item(
     source_uri: str,
     title: str | None = None,
@@ -56,8 +63,12 @@ def add_item(
     expires_at: datetime | None = None,
     created_at: datetime | str | None = None,
     machine: str | None = None,
+    embeddings: list[list[float]] | None = None,
 ) -> tuple[Item, str]:
-    """Upsert an item; returns (item, status) with status in added/unchanged/merged."""
+    """Upsert an item; returns (item, status) with status in added/unchanged/merged.
+
+    Pass precomputed embeddings (one per chunk) to skip per-item embedding calls.
+    """
     chunks = chunks or []
     tags = list(dict.fromkeys(tags or []))
     new_hash = compute_content_hash(chunks)
@@ -145,7 +156,8 @@ def add_item(
         session.commit()
 
         if texts_to_embed:
-            embeddings = get_embeddings_sync(texts_to_embed)
+            if embeddings is None:
+                embeddings = get_embeddings_sync(texts_to_embed)
             conn = get_raw_connection()
             cursor = conn.cursor()
             for chunk_record, embedding in zip(chunk_records, embeddings):
@@ -165,6 +177,7 @@ def ingest_record(
     *,
     extra_tags: list[str] | None = None,
     default_machine: str | None = None,
+    embeddings: list[list[float]] | None = None,
 ) -> tuple[Item, str]:
     """Ingest one Record (the contract extractors emit) via add_item.
 
@@ -182,6 +195,7 @@ def ingest_record(
         chunks=record.chunks,
         created_at=record.created_at,
         machine=machine,
+        embeddings=embeddings,
     )
 
 
