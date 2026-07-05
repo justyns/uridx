@@ -110,7 +110,7 @@ def ingest(
     if text:
         content = sys.stdin.read()
         with console.status(f"Ingesting {text}..."):
-            item = add_item(
+            item, _ = add_item(
                 source_uri=text,
                 chunks=[ChunkInput(text=content)],
                 tags=tag,
@@ -118,7 +118,7 @@ def ingest(
             )
         print(json.dumps({"source_uri": item.source_uri, "chunks": len(item.chunks)}))
     else:
-        count = 0
+        counts = {"added": 0, "unchanged": 0, "merged": 0}
         with Progress(
             SpinnerColumn(),
             TextColumn("[progress.description]{task.description}"),
@@ -136,10 +136,10 @@ def ingest(
                     print(f"Error: invalid record on line {i}:\n{e}", file=sys.stderr)
                     raise typer.Exit(1)
                 progress.update(task, description=f"{record.source_uri[:60]}")
-                ingest_record(record, extra_tags=tag)
-                count += 1
+                _, status = ingest_record(record, extra_tags=tag)
+                counts[status] += 1
                 progress.advance(task)
-        print(json.dumps({"ingested": count}))
+        print(json.dumps({"ingested": counts["added"], "unchanged": counts["unchanged"], "merged": counts["merged"]}))
 
 
 @app.command()

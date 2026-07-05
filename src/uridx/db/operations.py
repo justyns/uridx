@@ -56,7 +56,8 @@ def add_item(
     expires_at: datetime | None = None,
     created_at: datetime | str | None = None,
     machine: str | None = None,
-) -> Item:
+) -> tuple[Item, str]:
+    """Upsert an item; returns (item, status) with status in added/unchanged/merged."""
     chunks = chunks or []
     tags = list(dict.fromkeys(tags or []))
     new_hash = compute_content_hash(chunks)
@@ -86,7 +87,7 @@ def add_item(
 
             session.commit()
             session.refresh(existing)
-            return _detach_item(session, existing)
+            return _detach_item(session, existing), "unchanged"
 
         if existing:
             _delete_item_in_session(session, existing)
@@ -104,7 +105,7 @@ def add_item(
             hash_match.updated_at = datetime.utcnow()
             session.commit()
             session.refresh(hash_match)
-            return _detach_item(session, hash_match)
+            return _detach_item(session, hash_match), "merged"
 
         item = Item(
             source_uri=source_uri,
@@ -156,7 +157,7 @@ def add_item(
             conn.close()
 
         session.refresh(item)
-        return _detach_item(session, item)
+        return _detach_item(session, item), "added"
 
 
 def ingest_record(
@@ -164,7 +165,7 @@ def ingest_record(
     *,
     extra_tags: list[str] | None = None,
     default_machine: str | None = None,
-) -> Item:
+) -> tuple[Item, str]:
     """Ingest one Record (the contract extractors emit) via add_item.
 
     Shared by the `ingest` and `add` CLI commands. Does NOT init the DB — the
