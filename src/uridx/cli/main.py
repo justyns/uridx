@@ -13,19 +13,17 @@ from uridx.cli.extract import app as extract_app
 from uridx.cli.extract.base import MissingExtractorDependency, filter_existing_files
 from uridx.cli.extract.registry import load_extractor, resolve_dispatch
 from uridx.config import get_machine_id
-from uridx.db.engine import init_db
+from uridx.db.engine import init_db, require_embed_model_match
 from uridx.db.operations import (
     add_item,
-    content_hash_exists,
     delete_item,
     delete_items_by_prefix,
     get_item,
     get_stats,
-    ingest_record,
+    ingest_records,
     list_items_by_prefix,
     reindex_embeddings,
 )
-from uridx.embeddings import get_embeddings_sync
 from uridx.record import ChunkInput, Record
 from uridx.search.hybrid import hybrid_search
 
@@ -33,7 +31,16 @@ app = typer.Typer()
 app.add_typer(extract_app, name="extract")
 
 SNIPPET_LIMIT = 400
-EMBED_BATCH_CHUNKS = 64
+
+
+def _progress(console: Console) -> Progress:
+    return Progress(
+        SpinnerColumn(),
+        TextColumn("[progress.description]{task.description}"),
+        BarColumn(),
+        MofNCompleteColumn(),
+        console=console,
+    )
 
 
 def _snippet(text: str, limit: int = SNIPPET_LIMIT) -> str:
@@ -69,6 +76,8 @@ def search(
     after: Annotated[Optional[datetime], typer.Option("--after")] = None,
 ):
     init_db()
+    if semantic and query.strip():
+        require_embed_model_match()
     results = hybrid_search(
         query,
         limit=limit,
@@ -109,6 +118,7 @@ def ingest(
     tag: Annotated[Optional[list[str]], typer.Option("--tag", "-t", help="Tags for ingested items")] = None,
 ):
     init_db()
+    require_embed_model_match()
     console = Console(stderr=True)
 
     if text:
@@ -122,54 +132,24 @@ def ingest(
             )
         print(json.dumps({"source_uri": item.source_uri, "chunks": len(item.chunks)}))
     else:
-        counts = {"added": 0, "unchanged": 0, "merged": 0}
-        batch: list[Record] = []
-        batch_chunks = 0
 
-        with Progress(
-            SpinnerColumn(),
-            TextColumn("[progress.description]{task.description}"),
-            BarColumn(),
-            MofNCompleteColumn(),
-            console=console,
-        ) as progress:
-            task = progress.add_task("Ingesting...", total=None)
-
-            def flush():
-                """Embed all buffered chunks in one call, then ingest each record."""
-                nonlocal batch_chunks
-                if not batch:
-                    return
-                embs = get_embeddings_sync([c.text for rec in batch for c in rec.chunks])
-                pos = 0
-                for rec in batch:
-                    _, status = ingest_record(rec, extra_tags=tag, embeddings=embs[pos : pos + len(rec.chunks)])
-                    pos += len(rec.chunks)
-                    counts[status] += 1
-                    progress.advance(task)
-                batch.clear()
-                batch_chunks = 0
-
+        def read_records():
             for i, line in enumerate(sys.stdin, 1):
                 if not (line := line.strip()):
                     continue
                 try:
-                    record = Record.model_validate_json(line)
+                    yield Record.model_validate_json(line)
                 except ValidationError as e:
-                    flush()
                     print(f"Error: invalid record on line {i}:\n{e}", file=sys.stderr)
                     raise typer.Exit(1)
-                progress.update(task, description=f"{record.source_uri[:60]}")
-                if content_hash_exists(record.chunks):
-                    _, status = ingest_record(record, extra_tags=tag)
-                    counts[status] += 1
-                    progress.advance(task)
-                else:
-                    batch.append(record)
-                    batch_chunks += len(record.chunks)
-                    if batch_chunks >= EMBED_BATCH_CHUNKS:
-                        flush()
-            flush()
+
+        with _progress(console) as progress:
+            task = progress.add_task("Ingesting...", total=None)
+            counts = ingest_records(
+                read_records(),
+                extra_tags=tag,
+                on_result=lambda rec, _: progress.update(task, description=rec.source_uri[:60], advance=1),
+            )
         print(json.dumps({"ingested": counts["added"], "unchanged": counts["unchanged"], "merged": counts["merged"]}))
 
 
@@ -211,6 +191,7 @@ def add(
         return
 
     init_db()
+    require_embed_model_match()
     console = Console(stderr=True)
 
     # Pre-filter each bucket so already-indexed files are dropped (and reported) before any heavy work.
@@ -224,21 +205,19 @@ def add(
 
     ingested = 0
     by_type: dict[str, int] = {}
-    with Progress(
-        SpinnerColumn(),
-        TextColumn("[progress.description]{task.description}"),
-        console=console,
-    ) as progress:
+    with _progress(console) as progress:
         task = progress.add_task("Adding...", total=None)
         for name, survivors in plan:
             module = load_extractor(name)
+
+            def on_result(rec, _status, name=name):
+                stype = rec.source_type or name
+                by_type[stype] = by_type.get(stype, 0) + 1
+                progress.update(task, description=f"{name}: {rec.source_uri[:50]}", advance=1)
+
             try:
-                for rec in module.iter_records(survivors, tag=tag):
-                    ingest_record(rec)
-                    ingested += 1
-                    stype = rec.source_type or name
-                    by_type[stype] = by_type.get(stype, 0) + 1
-                    progress.update(task, description=f"{name}: {rec.source_uri[:50]}")
+                counts = ingest_records(module.iter_records(survivors, tag=tag), on_result=on_result)
+                ingested += counts["added"]
             except MissingExtractorDependency as e:
                 print(f"Skipping {name}: {e}", file=sys.stderr)
 
@@ -305,18 +284,11 @@ def reindex():
     already in the DB — no re-extraction needed. Use after changing URIDX_EMBEDDINGS,
     FASTEMBED_MODEL, or OLLAMA_EMBED_MODEL.
     """
-    init_db(check_embed_model=False)
+    init_db()
     console = Console(stderr=True)
-    with Progress(
-        SpinnerColumn(),
-        TextColumn("[progress.description]{task.description}"),
-        BarColumn(),
-        MofNCompleteColumn(),
-        console=console,
-    ) as progress:
+    with _progress(console) as progress:
         task = progress.add_task("Reindexing...", total=None)
         count = reindex_embeddings(
-            batch_size=EMBED_BATCH_CHUNKS,
             on_progress=lambda done, total: progress.update(task, completed=done, total=total),
         )
     print(json.dumps({"reindexed": count}))

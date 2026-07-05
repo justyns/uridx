@@ -32,6 +32,12 @@ _FTS_SPECIAL = re.compile(r'[":*^(){}[\]|\\]')
 _WORD_RE = re.compile(r"[a-zA-Z0-9_]+(?:'[a-zA-Z]+)?")
 
 
+def _quote(term: str) -> str:
+    """Quote a term as an FTS5 string literal (embedded quotes doubled)."""
+    escaped = term.replace('"', '""')
+    return f'"{escaped}"'
+
+
 def process_query(query: str) -> str:
     """Extract keywords from a query and return an FTS5 MATCH expression."""
     if not query.strip():
@@ -41,7 +47,7 @@ def process_query(query: str) -> str:
     keywords = list(dict.fromkeys(w for w in words if w not in STOP_WORDS and len(w) >= 2))
 
     if keywords:
-        return " OR ".join(f'"{kw}"' for kw in keywords)
+        return " OR ".join(_quote(kw) for kw in keywords)
 
     safe = _FTS_SPECIAL.sub("", query).strip()
-    return f'"{safe}"' if safe else ""
+    return _quote(safe) if safe else ""

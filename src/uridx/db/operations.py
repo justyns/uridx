@@ -1,15 +1,20 @@
 import hashlib
 import json
-import sys
+from collections.abc import Callable, Iterable
 from datetime import datetime
+from typing import Literal
 
 from sqlmodel import func, select
 
 from uridx.config import get_machine_id
-from uridx.db.engine import get_raw_connection, get_session
+from uridx.db.engine import create_embeddings_table, get_raw_connection, get_session
 from uridx.db.models import Chunk, Item, Location, Setting, Tag
 from uridx.embeddings import get_dimension, get_embeddings_sync, get_model_id, serialize_embedding
 from uridx.record import ChunkInput, Record
+
+IngestStatus = Literal["added", "unchanged", "merged"]
+
+EMBED_BATCH_CHUNKS = 64
 
 
 def compute_content_hash(chunks: list[ChunkInput]) -> str:
@@ -29,6 +34,13 @@ def _delete_chunk_embeddings(chunk_ids: list[int]) -> None:
     conn.close()
 
 
+def _insert_chunk_embeddings(cursor, pairs: Iterable[tuple[int, list[float]]]) -> None:
+    cursor.executemany(
+        "INSERT INTO chunk_embeddings (chunk_id, embedding) VALUES (?, ?)",
+        [(chunk_id, serialize_embedding(embedding)) for chunk_id, embedding in pairs],
+    )
+
+
 def _ensure_location(session, item_id: int, uri: str, machine: str | None) -> None:
     existing = session.exec(select(Location).where(Location.item_id == item_id, Location.uri == uri)).first()
     if not existing:
@@ -46,13 +58,6 @@ def _detach_item(session, item: Item) -> Item:
     return item
 
 
-def content_hash_exists(chunks: list[ChunkInput]) -> bool:
-    """True if this content already exists — add_item would skip or merge without embedding."""
-    with get_session() as session:
-        h = compute_content_hash(chunks)
-        return session.exec(select(Item.id).where(Item.content_hash == h)).first() is not None
-
-
 def add_item(
     source_uri: str,
     title: str | None = None,
@@ -64,14 +69,16 @@ def add_item(
     created_at: datetime | str | None = None,
     machine: str | None = None,
     embeddings: list[list[float]] | None = None,
-) -> tuple[Item, str]:
-    """Upsert an item; returns (item, status) with status in added/unchanged/merged.
+    content_hash: str | None = None,
+) -> tuple[Item, IngestStatus]:
+    """Upsert an item; returns (item, status).
 
-    Pass precomputed embeddings (one per chunk) to skip per-item embedding calls.
+    Pass precomputed embeddings (one per chunk) and/or content_hash to skip
+    recomputing them per item.
     """
     chunks = chunks or []
     tags = list(dict.fromkeys(tags or []))
-    new_hash = compute_content_hash(chunks)
+    new_hash = content_hash or compute_content_hash(chunks)
 
     # Parse created_at if string
     if isinstance(created_at, str):
@@ -81,7 +88,6 @@ def add_item(
         existing = session.exec(select(Item).where(Item.source_uri == source_uri)).first()
 
         if existing and existing.content_hash == new_hash:
-            print(f"  Skipping {source_uri} (unchanged)", file=sys.stderr)
             _ensure_location(session, existing.id, source_uri, machine)
             existing.title = title
             existing.source_type = source_type
@@ -107,7 +113,6 @@ def add_item(
         # Check if content_hash matches another item (merge case)
         hash_match = session.exec(select(Item).where(Item.content_hash == new_hash)).first()
         if hash_match:
-            print(f"  Merging {source_uri} into {hash_match.source_uri}", file=sys.stderr)
             _ensure_location(session, hash_match.id, source_uri, machine)
             existing_tags = {t.tag for t in hash_match.tags}
             for tag_name in tags:
@@ -159,12 +164,7 @@ def add_item(
             if embeddings is None:
                 embeddings = get_embeddings_sync(texts_to_embed)
             conn = get_raw_connection()
-            cursor = conn.cursor()
-            for chunk_record, embedding in zip(chunk_records, embeddings):
-                cursor.execute(
-                    "INSERT INTO chunk_embeddings (chunk_id, embedding) VALUES (?, ?)",
-                    (chunk_record.id, serialize_embedding(embedding)),
-                )
+            _insert_chunk_embeddings(conn.cursor(), zip((c.id for c in chunk_records), embeddings))
             conn.commit()
             conn.close()
 
@@ -178,11 +178,11 @@ def ingest_record(
     extra_tags: list[str] | None = None,
     default_machine: str | None = None,
     embeddings: list[list[float]] | None = None,
-) -> tuple[Item, str]:
+    content_hash: str | None = None,
+) -> tuple[Item, IngestStatus]:
     """Ingest one Record (the contract extractors emit) via add_item.
 
-    Shared by the `ingest` and `add` CLI commands. Does NOT init the DB — the
-    caller must call init_db() once before looping.
+    Does NOT init the DB — the caller must call init_db() once before looping.
     """
     tags = (record.tags + (extra_tags or [])) or None  # add_item dedups
     machine = record.machine or default_machine or get_machine_id()
@@ -196,7 +196,53 @@ def ingest_record(
         created_at=record.created_at,
         machine=machine,
         embeddings=embeddings,
+        content_hash=content_hash,
     )
+
+
+def ingest_records(
+    records: Iterable[Record],
+    *,
+    extra_tags: list[str] | None = None,
+    on_result: Callable[[Record, IngestStatus], None] | None = None,
+    batch_chunks: int = EMBED_BATCH_CHUNKS,
+) -> dict[IngestStatus, int]:
+    """Ingest a record stream, batching embedding calls across records.
+
+    Buffers records until ~batch_chunks chunks accumulate, then embeds all new
+    content in one call: one query partitions the batch into known content (hash
+    already indexed — no embedding) and new content (embedded once per unique
+    hash, so intra-batch duplicates aren't re-embedded). Shared by `ingest` and
+    `add`. Returns counts by status; on_result fires per record as it lands.
+    """
+    counts: dict[IngestStatus, int] = {"added": 0, "unchanged": 0, "merged": 0}
+    batch: list[tuple[Record, str]] = []
+
+    def flush():
+        if not batch:
+            return
+        hashes = {h for _, h in batch}
+        with get_session() as session:
+            known = set(session.exec(select(Item.content_hash).where(Item.content_hash.in_(hashes))).all())
+        to_embed = {h: rec for rec, h in batch if h not in known}  # one representative per unique new hash
+        texts = [c.text for rec in to_embed.values() for c in rec.chunks]
+        embedded = iter(get_embeddings_sync(texts)) if texts else iter(())
+        embeddings_by_hash = {h: [next(embedded) for _ in rec.chunks] for h, rec in to_embed.items()}
+        for rec, h in batch:
+            _, status = ingest_record(rec, extra_tags=extra_tags, embeddings=embeddings_by_hash.get(h), content_hash=h)
+            counts[status] += 1
+            if on_result:
+                on_result(rec, status)
+        batch.clear()
+
+    try:
+        for record in records:
+            batch.append((record, compute_content_hash(record.chunks)))
+            if sum(len(rec.chunks) for rec, _ in batch) >= batch_chunks:
+                flush()
+    finally:
+        flush()  # also persists buffered work when the record stream raises
+    return counts
 
 
 def _delete_item_in_session(session, item: Item) -> None:
@@ -250,29 +296,23 @@ def get_item(source_uri: str) -> Item | None:
         return _detach_item(session, item)
 
 
-def reindex_embeddings(batch_size: int = 64, on_progress=None) -> int:
+def reindex_embeddings(batch_size: int = EMBED_BATCH_CHUNKS, on_progress=None) -> int:
     """Re-embed every chunk from its stored text with the current embedding backend/model.
 
     Drops and recreates the vector table at the backend's dimension (updating the
-    embed_dimension setting), so this is how you switch models. Items, chunks, tags,
-    and FTS are untouched. Returns the number of chunks re-embedded.
+    embed_dimension and embed_model settings), so this is how you switch models.
+    Items, chunks, tags, and FTS are untouched. Returns the number of chunks re-embedded.
     """
     dim = get_dimension()
     conn = get_raw_connection()
     cursor = conn.cursor()
     cursor.execute("DROP TABLE IF EXISTS chunk_embeddings")
-    cursor.execute(
-        f"CREATE VIRTUAL TABLE chunk_embeddings USING vec0(chunk_id INTEGER PRIMARY KEY, embedding float[{dim}])"
-    )
+    create_embeddings_table(cursor, dim)
     conn.commit()
 
     with get_session() as session:
-        for key, value in (("embed_dimension", str(dim)), ("embed_model", get_model_id())):
-            setting = session.get(Setting, key)
-            if setting:
-                setting.value = value
-            else:
-                session.add(Setting(key=key, value=value))
+        session.merge(Setting(key="embed_dimension", value=str(dim)))
+        session.merge(Setting(key="embed_model", value=get_model_id()))
         session.commit()
 
     total = cursor.execute("SELECT COUNT(*) FROM chunk").fetchone()[0]
@@ -285,11 +325,7 @@ def reindex_embeddings(batch_size: int = 64, on_progress=None) -> int:
         if not rows:
             break
         embeddings = get_embeddings_sync([text for _, text in rows])
-        for (chunk_id, _), embedding in zip(rows, embeddings):
-            cursor.execute(
-                "INSERT INTO chunk_embeddings (chunk_id, embedding) VALUES (?, ?)",
-                (chunk_id, serialize_embedding(embedding)),
-            )
+        _insert_chunk_embeddings(cursor, zip((chunk_id for chunk_id, _ in rows), embeddings))
         conn.commit()
         last_id = rows[-1][0]
         done += len(rows)
