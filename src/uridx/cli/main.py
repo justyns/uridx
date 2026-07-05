@@ -23,6 +23,7 @@ from uridx.db.operations import (
     get_stats,
     ingest_record,
     list_items_by_prefix,
+    reindex_embeddings,
 )
 from uridx.embeddings import get_embeddings_sync
 from uridx.record import ChunkInput, Record
@@ -294,6 +295,31 @@ def delete(
 def stats():
     init_db()
     print(json.dumps(get_stats(), indent=2))
+
+
+@app.command()
+def reindex():
+    """Re-embed all chunks with the current embedding backend/model.
+
+    Rebuilds only the vector table (at the new model's dimension) from chunk text
+    already in the DB — no re-extraction needed. Use after changing URIDX_EMBEDDINGS,
+    FASTEMBED_MODEL, or OLLAMA_EMBED_MODEL.
+    """
+    init_db()
+    console = Console(stderr=True)
+    with Progress(
+        SpinnerColumn(),
+        TextColumn("[progress.description]{task.description}"),
+        BarColumn(),
+        MofNCompleteColumn(),
+        console=console,
+    ) as progress:
+        task = progress.add_task("Reindexing...", total=None)
+        count = reindex_embeddings(
+            batch_size=EMBED_BATCH_CHUNKS,
+            on_progress=lambda done, total: progress.update(task, completed=done, total=total),
+        )
+    print(json.dumps({"reindexed": count}))
 
 
 if __name__ == "__main__":

@@ -7,8 +7,8 @@ from sqlmodel import func, select
 
 from uridx.config import get_machine_id
 from uridx.db.engine import get_raw_connection, get_session
-from uridx.db.models import Chunk, Item, Location, Tag
-from uridx.embeddings import get_embeddings_sync, serialize_embedding
+from uridx.db.models import Chunk, Item, Location, Setting, Tag
+from uridx.embeddings import get_dimension, get_embeddings_sync, serialize_embedding
 from uridx.record import ChunkInput, Record
 
 
@@ -248,6 +248,54 @@ def get_item(source_uri: str) -> Item | None:
             return None
 
         return _detach_item(session, item)
+
+
+def reindex_embeddings(batch_size: int = 64, on_progress=None) -> int:
+    """Re-embed every chunk from its stored text with the current embedding backend/model.
+
+    Drops and recreates the vector table at the backend's dimension (updating the
+    embed_dimension setting), so this is how you switch models. Items, chunks, tags,
+    and FTS are untouched. Returns the number of chunks re-embedded.
+    """
+    dim = get_dimension()
+    conn = get_raw_connection()
+    cursor = conn.cursor()
+    cursor.execute("DROP TABLE IF EXISTS chunk_embeddings")
+    cursor.execute(
+        f"CREATE VIRTUAL TABLE chunk_embeddings USING vec0(chunk_id INTEGER PRIMARY KEY, embedding float[{dim}])"
+    )
+    conn.commit()
+
+    with get_session() as session:
+        setting = session.get(Setting, "embed_dimension")
+        if setting:
+            setting.value = str(dim)
+        else:
+            session.add(Setting(key="embed_dimension", value=str(dim)))
+        session.commit()
+
+    total = cursor.execute("SELECT COUNT(*) FROM chunk").fetchone()[0]
+    done = 0
+    last_id = 0
+    while True:
+        rows = cursor.execute(
+            "SELECT id, text FROM chunk WHERE id > ? ORDER BY id LIMIT ?", (last_id, batch_size)
+        ).fetchall()
+        if not rows:
+            break
+        embeddings = get_embeddings_sync([text for _, text in rows])
+        for (chunk_id, _), embedding in zip(rows, embeddings):
+            cursor.execute(
+                "INSERT INTO chunk_embeddings (chunk_id, embedding) VALUES (?, ?)",
+                (chunk_id, serialize_embedding(embedding)),
+            )
+        conn.commit()
+        last_id = rows[-1][0]
+        done += len(rows)
+        if on_progress:
+            on_progress(done, total)
+    conn.close()
+    return done
 
 
 def get_stats() -> dict:
