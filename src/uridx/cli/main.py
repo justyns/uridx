@@ -305,7 +305,7 @@ def reindex():
     already in the DB — no re-extraction needed. Use after changing URIDX_EMBEDDINGS,
     FASTEMBED_MODEL, or OLLAMA_EMBED_MODEL.
     """
-    init_db()
+    init_db(check_embed_model=False)
     console = Console(stderr=True)
     with Progress(
         SpinnerColumn(),

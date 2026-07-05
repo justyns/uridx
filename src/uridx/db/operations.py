@@ -8,7 +8,7 @@ from sqlmodel import func, select
 from uridx.config import get_machine_id
 from uridx.db.engine import get_raw_connection, get_session
 from uridx.db.models import Chunk, Item, Location, Setting, Tag
-from uridx.embeddings import get_dimension, get_embeddings_sync, serialize_embedding
+from uridx.embeddings import get_dimension, get_embeddings_sync, get_model_id, serialize_embedding
 from uridx.record import ChunkInput, Record
 
 
@@ -267,11 +267,12 @@ def reindex_embeddings(batch_size: int = 64, on_progress=None) -> int:
     conn.commit()
 
     with get_session() as session:
-        setting = session.get(Setting, "embed_dimension")
-        if setting:
-            setting.value = str(dim)
-        else:
-            session.add(Setting(key="embed_dimension", value=str(dim)))
+        for key, value in (("embed_dimension", str(dim)), ("embed_model", get_model_id())):
+            setting = session.get(Setting, key)
+            if setting:
+                setting.value = value
+            else:
+                session.add(Setting(key=key, value=value))
         session.commit()
 
     total = cursor.execute("SELECT COUNT(*) FROM chunk").fetchone()[0]

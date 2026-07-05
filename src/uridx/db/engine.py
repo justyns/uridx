@@ -1,4 +1,5 @@
 import sqlite3
+import sys
 from pathlib import Path
 
 import sqlite_vec
@@ -6,7 +7,7 @@ from sqlmodel import Session, SQLModel, create_engine
 
 from uridx.config import URIDX_DB_PATH
 from uridx.db.models import Setting
-from uridx.embeddings import get_dimension
+from uridx.embeddings import get_dimension, get_model_id
 
 _engine = None
 
@@ -122,7 +123,10 @@ def get_session() -> Session:
 _db_initialized = False
 
 
-def init_db():
+def init_db(check_embed_model: bool = True):
+    """Create/migrate the schema. Errors if the configured embedding model no longer
+    matches the one the index was embedded with (pass check_embed_model=False to allow
+    a mismatch, as `reindex` must)."""
     global _db_initialized
     if _db_initialized:
         return
@@ -137,6 +141,21 @@ def init_db():
             embed_dim = get_dimension()
             session.add(Setting(key="embed_dimension", value=str(embed_dim)))
             session.commit()
+
+        model_id = get_model_id()
+        stored_model = session.get(Setting, "embed_model")
+        if stored_model is None:
+            session.add(Setting(key="embed_model", value=model_id))
+            session.commit()
+        elif check_embed_model and stored_model.value != model_id:
+            print(
+                f"Error: this index was embedded with {stored_model.value}, "
+                f"but the current config is {model_id}.\n"
+                "Run `uridx reindex` to re-embed the index, or restore the original "
+                "URIDX_EMBEDDINGS / FASTEMBED_MODEL / OLLAMA_EMBED_MODEL settings.",
+                file=sys.stderr,
+            )
+            raise SystemExit(1)
 
     conn = get_raw_connection()
     cursor = conn.cursor()
