@@ -1,7 +1,7 @@
 import hashlib
 import json
 from collections.abc import Callable, Iterable
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Literal
 
 from sqlmodel import func, select
@@ -10,7 +10,7 @@ from uridx.config import get_machine_id
 from uridx.db.engine import create_embeddings_table, get_raw_connection, get_session
 from uridx.db.models import Chunk, Item, Location, Setting, Tag
 from uridx.embeddings import get_dimension, get_embeddings_sync, get_model_id, serialize_embedding
-from uridx.record import ChunkInput, Record
+from uridx.record import ChunkInput, LocationInput, Record
 
 IngestStatus = Literal["added", "unchanged", "merged"]
 
@@ -21,6 +21,15 @@ def compute_content_hash(chunks: list[ChunkInput]) -> str:
     """Compute SHA256 hash of chunk texts for change detection."""
     content = "\n".join(c.text for c in chunks)
     return hashlib.sha256(content.encode()).hexdigest()[:32]
+
+
+def parse_timestamp(value: datetime | str | None) -> datetime | None:
+    """Parse an ISO timestamp to the naive-UTC datetimes stored in the DB."""
+    if isinstance(value, str):
+        value = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    if value is not None and value.tzinfo is not None:
+        value = value.astimezone(timezone.utc).replace(tzinfo=None)
+    return value
 
 
 def _delete_chunk_embeddings(chunk_ids: list[int]) -> None:
@@ -41,12 +50,37 @@ def _insert_chunk_embeddings(cursor, pairs: Iterable[tuple[int, list[float]]]) -
     )
 
 
-def _ensure_location(session, item_id: int, uri: str, machine: str | None) -> None:
-    existing = session.exec(select(Location).where(Location.item_id == item_id, Location.uri == uri)).first()
-    if not existing:
-        session.add(Location(item_id=item_id, uri=uri, machine=machine))
-    elif machine and existing.machine != machine:
-        existing.machine = machine
+def read_chunk_embeddings(conn, chunk_ids: list[int]) -> dict[int, bytes]:
+    """Read stored embedding blobs by chunk id (export pass-through)."""
+    if not chunk_ids:
+        return {}
+    placeholders = ",".join("?" * len(chunk_ids))
+    rows = conn.execute(
+        f"SELECT chunk_id, embedding FROM chunk_embeddings WHERE chunk_id IN ({placeholders})", chunk_ids
+    ).fetchall()
+    return dict(rows)
+
+
+def _apply_locations(
+    session, item_id: int, source_uri: str, machine: str | None, locations: list[LocationInput] | None
+) -> bool:
+    """Add missing locations and backfill null machines; never overwrite a known origin.
+
+    Returns True if anything changed."""
+    wanted: dict[str, str | None] = {source_uri: machine}
+    for loc in locations or []:
+        wanted[loc.uri] = wanted.get(loc.uri) or loc.machine
+    existing = {loc.uri: loc for loc in session.exec(select(Location).where(Location.item_id == item_id))}
+    changed = False
+    for uri, mach in wanted.items():
+        row = existing.get(uri)
+        if row is None:
+            session.add(Location(item_id=item_id, uri=uri, machine=mach))
+            changed = True
+        elif mach and row.machine is None:
+            row.machine = mach
+            changed = True
+    return changed
 
 
 def _detach_item(session, item: Item) -> Item:
@@ -67,40 +101,61 @@ def add_item(
     tags: list[str] | None = None,
     expires_at: datetime | None = None,
     created_at: datetime | str | None = None,
+    updated_at: datetime | str | None = None,
     machine: str | None = None,
     embeddings: list[list[float]] | None = None,
     content_hash: str | None = None,
+    locations: list[LocationInput] | None = None,
 ) -> tuple[Item, IngestStatus]:
     """Upsert an item; returns (item, status).
 
     Pass precomputed embeddings (one per chunk) and/or content_hash to skip
-    recomputing them per item.
+    recomputing them per item. Passing updated_at switches to import semantics:
+    last-writer-wins on metadata, tag union, and the timestamp is preserved
+    rather than bumped (so re-imports don't mark items dirty).
     """
     chunks = chunks or []
     tags = list(dict.fromkeys(tags or []))
     new_hash = content_hash or compute_content_hash(chunks)
-
-    # Parse created_at if string
-    if isinstance(created_at, str):
-        created_at = datetime.fromisoformat(created_at.replace("Z", "+00:00"))
+    created_at = parse_timestamp(created_at)
+    incoming = parse_timestamp(updated_at)
 
     with get_session() as session:
         existing = session.exec(select(Item).where(Item.source_uri == source_uri)).first()
 
         if existing and existing.content_hash == new_hash:
-            _ensure_location(session, existing.id, source_uri, machine)
-            existing.title = title
-            existing.source_type = source_type
-            existing.context = context
-            existing.expires_at = expires_at
-            existing.updated_at = datetime.utcnow()
-
+            changed = _apply_locations(session, existing.id, source_uri, machine, locations)
             existing_tags = {t.tag for t in existing.tags}
-            if existing_tags != set(tags):
-                for tag in list(existing.tags):
-                    session.delete(tag)
+            if incoming is None:
+                if (title, source_type, context, expires_at) != (
+                    existing.title,
+                    existing.source_type,
+                    existing.context,
+                    existing.expires_at,
+                ):
+                    existing.title = title
+                    existing.source_type = source_type
+                    existing.context = context
+                    existing.expires_at = expires_at
+                    changed = True
+                if existing_tags != set(tags):
+                    changed = True
+                    for tag in list(existing.tags):
+                        session.delete(tag)
+                    for tag_name in tags:
+                        session.add(Tag(item_id=existing.id, tag=tag_name))
+                if changed:
+                    existing.updated_at = datetime.utcnow()
+            else:
+                if incoming > existing.updated_at:
+                    existing.title = title
+                    existing.source_type = source_type
+                    existing.context = context
+                    existing.expires_at = expires_at
+                    existing.updated_at = incoming
                 for tag_name in tags:
-                    session.add(Tag(item_id=existing.id, tag=tag_name))
+                    if tag_name not in existing_tags:
+                        session.add(Tag(item_id=existing.id, tag=tag_name))
 
             session.commit()
             session.refresh(existing)
@@ -113,12 +168,16 @@ def add_item(
         # Check if content_hash matches another item (merge case)
         hash_match = session.exec(select(Item).where(Item.content_hash == new_hash)).first()
         if hash_match:
-            _ensure_location(session, hash_match.id, source_uri, machine)
+            changed = _apply_locations(session, hash_match.id, source_uri, machine, locations)
             existing_tags = {t.tag for t in hash_match.tags}
             for tag_name in tags:
                 if tag_name not in existing_tags:
                     session.add(Tag(item_id=hash_match.id, tag=tag_name))
-            hash_match.updated_at = datetime.utcnow()
+                    changed = True
+            if incoming is not None:
+                hash_match.updated_at = max(hash_match.updated_at, incoming)
+            elif changed:
+                hash_match.updated_at = datetime.utcnow()
             session.commit()
             session.refresh(hash_match)
             return _detach_item(session, hash_match), "merged"
@@ -131,7 +190,7 @@ def add_item(
             content_hash=new_hash,
             expires_at=expires_at,
             created_at=created_at or datetime.utcnow(),
-            updated_at=created_at or datetime.utcnow(),
+            updated_at=incoming or created_at or datetime.utcnow(),
         )
         session.add(item)
         session.flush()
@@ -156,7 +215,7 @@ def add_item(
         for tag_name in tags:
             session.add(Tag(item_id=item.id, tag=tag_name))
 
-        session.add(Location(item_id=item.id, uri=source_uri, machine=machine))
+        _apply_locations(session, item.id, source_uri, machine, locations)
 
         session.commit()
 
@@ -185,7 +244,8 @@ def ingest_record(
     Does NOT init the DB — the caller must call init_db() once before looping.
     """
     tags = (record.tags + (extra_tags or [])) or None  # add_item dedups
-    machine = record.machine or default_machine or get_machine_id()
+    # Records carrying locations (import streams) keep their origin machines; don't stamp the local host.
+    machine = record.machine or (None if record.locations else default_machine or get_machine_id())
     return add_item(
         source_uri=record.source_uri,
         title=record.title,
@@ -194,9 +254,11 @@ def ingest_record(
         tags=tags,
         chunks=record.chunks,
         created_at=record.created_at,
+        updated_at=record.updated_at,
         machine=machine,
         embeddings=embeddings,
         content_hash=content_hash,
+        locations=record.locations,
     )
 
 
@@ -206,6 +268,7 @@ def ingest_records(
     extra_tags: list[str] | None = None,
     on_result: Callable[[Record, IngestStatus], None] | None = None,
     batch_chunks: int = EMBED_BATCH_CHUNKS,
+    precomputed: Callable[[Record], list[list[float]] | None] | None = None,
 ) -> dict[IngestStatus, int]:
     """Ingest a record stream, batching embedding calls across records.
 
@@ -214,6 +277,9 @@ def ingest_records(
     already indexed — no embedding) and new content (embedded once per unique
     hash, so intra-batch duplicates aren't re-embedded). Shared by `ingest` and
     `add`. Returns counts by status; on_result fires per record as it lands.
+
+    precomputed, if given, may supply ready-made vectors for a record (import
+    pass-through); records it returns None for are batch-embedded as usual.
     """
     counts: dict[IngestStatus, int] = {"added": 0, "unchanged": 0, "merged": 0}
     batch: list[tuple[Record, str]] = []
@@ -225,9 +291,13 @@ def ingest_records(
         with get_session() as session:
             known = set(session.exec(select(Item.content_hash).where(Item.content_hash.in_(hashes))).all())
         to_embed = {h: rec for rec, h in batch if h not in known}  # one representative per unique new hash
+        embeddings_by_hash = {}
+        if precomputed:
+            embeddings_by_hash = {h: v for h, rec in to_embed.items() if (v := precomputed(rec)) is not None}
+            to_embed = {h: rec for h, rec in to_embed.items() if h not in embeddings_by_hash}
         texts = [c.text for rec in to_embed.values() for c in rec.chunks]
         embedded = iter(get_embeddings_sync(texts)) if texts else iter(())
-        embeddings_by_hash = {h: [next(embedded) for _ in rec.chunks] for h, rec in to_embed.items()}
+        embeddings_by_hash |= {h: [next(embedded) for _ in rec.chunks] for h, rec in to_embed.items()}
         for rec, h in batch:
             _, status = ingest_record(rec, extra_tags=extra_tags, embeddings=embeddings_by_hash.get(h), content_hash=h)
             counts[status] += 1

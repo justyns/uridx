@@ -107,6 +107,28 @@ uridx delete --source-prefix "file:///home/user/scratch/"
 uridx stats
 ```
 
+### Export / import (multi-machine)
+
+Stream the index (chunk text, tags, locations, optional embeddings) as JSONL to
+another machine — the original source files stay where they are, search works
+offline everywhere, and results point back at the owning machine.
+
+```bash
+# Push local index to a hub
+uridx export | ssh uridx@hub uridx import
+
+# Pull the hub's index back
+ssh uridx@hub uridx export | uridx import
+
+# Delta / filtered export
+uridx export --since 2026-07-01 --type markdown --no-embeddings
+```
+
+Imports are idempotent: identical content merges by hash (one item, a location
+per machine), timestamps and origin machines are preserved, and embeddings are
+reused when the embedding model matches — otherwise recomputed locally from the
+chunk text, so machines may run different models.
+
 ## Configuration
 
 Environment variables:

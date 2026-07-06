@@ -132,6 +132,12 @@ def get_session() -> Session:
     return Session(get_engine())
 
 
+def get_setting(key: str) -> str | None:
+    with get_session() as session:
+        setting = session.get(Setting, key)
+        return setting.value if setting else None
+
+
 _db_initialized = False
 
 
@@ -139,12 +145,11 @@ def require_embed_model_match():
     """Exit if the configured embedding model differs from the one the index was
     embedded with. Called by commands that read or write vectors; `reindex` (the fix)
     and vector-free commands like stats/delete skip it."""
-    with get_session() as session:
-        stored = session.get(Setting, "embed_model")
+    stored = get_setting("embed_model")
     model_id = get_model_id()
-    if stored and stored.value != model_id:
+    if stored and stored != model_id:
         print(
-            f"Error: this index was embedded with {stored.value}, "
+            f"Error: this index was embedded with {stored}, "
             f"but the current config is {model_id}.\n"
             "Run `uridx reindex` to re-embed the index, or restore the original "
             "URIDX_EMBEDDINGS / FASTEMBED_MODEL / OLLAMA_EMBED_MODEL settings.",

@@ -5,12 +5,11 @@ from datetime import datetime
 from typing import Annotated, Optional
 
 import typer
-from pydantic import ValidationError
 from rich.console import Console
 from rich.progress import BarColumn, MofNCompleteColumn, Progress, SpinnerColumn, TextColumn
 
 from uridx.cli.extract import app as extract_app
-from uridx.cli.extract.base import MissingExtractorDependency, filter_existing_files
+from uridx.cli.extract.base import MissingExtractorDependency, filter_existing_files, output
 from uridx.cli.extract.registry import load_extractor, resolve_dispatch
 from uridx.config import get_machine_id
 from uridx.db.engine import init_db, require_embed_model_match
@@ -22,10 +21,12 @@ from uridx.db.operations import (
     get_stats,
     ingest_records,
     list_items_by_prefix,
+    parse_timestamp,
     reindex_embeddings,
 )
-from uridx.record import ChunkInput, Record
+from uridx.record import ChunkInput, RecordError, iter_jsonl_records
 from uridx.search.hybrid import hybrid_search
+from uridx.sync import import_records, iter_export_records
 
 app = typer.Typer()
 app.add_typer(extract_app, name="extract")
@@ -57,6 +58,22 @@ def _snippet(text: str, limit: int = SNIPPET_LIMIT) -> str:
 
 def _indent(text: str, prefix: str = "  ") -> str:
     return "\n".join(prefix + line for line in text.splitlines())
+
+
+def _run_record_stream(run, verb: str, out_key: str):
+    """Feed stdin JSONL records through run(records, on_result) with progress; print summary counts."""
+    console = Console(stderr=True)
+    try:
+        with _progress(console) as progress:
+            task = progress.add_task(f"{verb}...", total=None)
+            counts = run(
+                iter_jsonl_records(sys.stdin),
+                lambda rec, _: progress.update(task, description=rec.source_uri[:60], advance=1),
+            )
+    except RecordError as e:
+        print(f"Error: {e}", file=sys.stderr)
+        raise typer.Exit(1)
+    print(json.dumps({out_key: counts["added"], "unchanged": counts["unchanged"], "merged": counts["merged"]}))
 
 
 @app.command()
@@ -119,11 +136,10 @@ def ingest(
 ):
     init_db()
     require_embed_model_match()
-    console = Console(stderr=True)
 
     if text:
         content = sys.stdin.read()
-        with console.status(f"Ingesting {text}..."):
+        with Console(stderr=True).status(f"Ingesting {text}..."):
             item, _ = add_item(
                 source_uri=text,
                 chunks=[ChunkInput(text=content)],
@@ -132,25 +148,11 @@ def ingest(
             )
         print(json.dumps({"source_uri": item.source_uri, "chunks": len(item.chunks)}))
     else:
-
-        def read_records():
-            for i, line in enumerate(sys.stdin, 1):
-                if not (line := line.strip()):
-                    continue
-                try:
-                    yield Record.model_validate_json(line)
-                except ValidationError as e:
-                    print(f"Error: invalid record on line {i}:\n{e}", file=sys.stderr)
-                    raise typer.Exit(1)
-
-        with _progress(console) as progress:
-            task = progress.add_task("Ingesting...", total=None)
-            counts = ingest_records(
-                read_records(),
-                extra_tags=tag,
-                on_result=lambda rec, _: progress.update(task, description=rec.source_uri[:60], advance=1),
-            )
-        print(json.dumps({"ingested": counts["added"], "unchanged": counts["unchanged"], "merged": counts["merged"]}))
+        _run_record_stream(
+            lambda records, on_result: ingest_records(records, extra_tags=tag, on_result=on_result),
+            "Ingesting",
+            "ingested",
+        )
 
 
 @app.command()
@@ -231,6 +233,47 @@ def add(
             }
         )
     )
+
+
+@app.command()
+def export(
+    since: Annotated[
+        Optional[str], typer.Option("--since", help="Only items updated at or after this ISO timestamp")
+    ] = None,
+    source_prefix: Annotated[Optional[str], typer.Option("--source-prefix", help="Filter by source URI prefix")] = None,
+    source_type: Annotated[Optional[str], typer.Option("--type", help="Filter by source type")] = None,
+    with_embeddings: Annotated[bool, typer.Option("--with-embeddings/--no-embeddings")] = True,
+):
+    """Export the index as JSONL for import on another machine.
+
+    Streams the indexed text-representation (chunks, tags, locations, optional
+    embeddings) — not the original source files. Pipe to `uridx import`:
+    `uridx export | ssh uridx@hub uridx import`.
+    """
+    init_db()
+    try:
+        since_ts = parse_timestamp(since)
+    except ValueError:
+        print(f"Error: invalid --since timestamp: {since}", file=sys.stderr)
+        raise typer.Exit(2)
+    records = iter_export_records(
+        since=since_ts, source_prefix=source_prefix, source_type=source_type, with_embeddings=with_embeddings
+    )
+    for record in records:
+        output(record)
+
+
+@app.command("import")
+def import_():
+    """Import an export stream (JSONL on stdin) into the local index.
+
+    Idempotent: identical content merges by hash, origin machines and timestamps
+    are preserved, and embeddings are reused when the model matches (otherwise
+    recomputed locally from chunk text).
+    """
+    init_db()
+    require_embed_model_match()
+    _run_record_stream(import_records, "Importing", "imported")
 
 
 @app.command()
