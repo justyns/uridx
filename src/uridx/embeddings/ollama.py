@@ -2,7 +2,9 @@ import httpx
 
 from uridx.config import normalize_ollama_url
 
-DEFAULT_TIMEOUT = 60.0
+# Read timeout must cover a full 64-chunk batch on a contended server (model
+# reload / other models hogging it); connect stays short so a down host fails fast.
+DEFAULT_TIMEOUT = httpx.Timeout(300.0, connect=10.0)
 
 
 def _url(base_url: str, path: str) -> str:
