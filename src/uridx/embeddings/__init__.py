@@ -8,6 +8,10 @@ from uridx.config import (
 )
 
 
+class EmbeddingBackendError(Exception):
+    """A backend call failed after retries; the message is user-facing."""
+
+
 def _backend():
     if URIDX_EMBEDDINGS == "ollama":
         from uridx.embeddings import ollama
@@ -35,11 +39,6 @@ def get_embeddings_sync(texts: list[str]) -> list[list[float]]:
     return mod.get_embeddings_sync(texts, *args)
 
 
-async def get_embeddings(texts: list[str]) -> list[list[float]]:
-    mod, args = _backend()
-    return await mod.get_embeddings(texts, *args)
-
-
 def serialize_embedding(embedding: list[float]) -> bytes:
     return struct.pack(f"{len(embedding)}f", *embedding)
 
@@ -49,8 +48,8 @@ def deserialize_embedding(data: bytes, dim: int) -> list[float]:
 
 
 __all__ = [
+    "EmbeddingBackendError",
     "get_dimension",
-    "get_embeddings",
     "get_embeddings_sync",
     "serialize_embedding",
     "deserialize_embedding",

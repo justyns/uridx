@@ -13,6 +13,7 @@ from uridx.cli.extract.base import MissingExtractorDependency, filter_existing_f
 from uridx.cli.extract.registry import load_extractor, resolve_dispatch
 from uridx.config import get_machine_id
 from uridx.db.engine import init_db, require_embed_model_match
+from uridx.embeddings import EmbeddingBackendError
 from uridx.db.operations import (
     add_item,
     delete_item,
@@ -28,7 +29,7 @@ from uridx.record import ChunkInput, RecordError, iter_jsonl_records
 from uridx.search.hybrid import hybrid_search
 from uridx.sync import import_records, iter_export_records
 
-app = typer.Typer()
+app = typer.Typer(pretty_exceptions_enable=False)
 app.add_typer(extract_app, name="extract")
 
 SNIPPET_LIMIT = 400
@@ -337,5 +338,14 @@ def reindex():
     print(json.dumps({"reindexed": count}))
 
 
+def main():
+    """Entry point: report embedding-backend failures as one-line errors instead of tracebacks."""
+    try:
+        app()
+    except EmbeddingBackendError as e:
+        print(f"Error: {e}", file=sys.stderr)
+        raise SystemExit(1)
+
+
 if __name__ == "__main__":
-    app()
+    main()

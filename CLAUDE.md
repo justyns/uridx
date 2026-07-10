@@ -27,7 +27,7 @@ uv run uridx --help                  # CLI help
   - `models.py`: SQLModel tables - Item, Chunk, Tag, Setting
   - `engine.py`: Manages SQLite connection, loads sqlite-vec extension, creates FTS5 virtual table with triggers
   - `operations.py`: CRUD operations, handles embedding generation and storage
-- **Embeddings** (`embeddings/ollama.py`): Ollama API client with sync/async variants, serializes embeddings to binary for sqlite-vec
+- **Embeddings** (`embeddings/ollama.py`): Ollama API client with retries, raises backend-neutral `EmbeddingBackendError` (caught once in `cli/main.py:main`), serializes embeddings to binary for sqlite-vec
 - **Config** (`config.py`): Environment variables for DB path, Ollama URL, and embedding model
 
 **Key Data Structures**:

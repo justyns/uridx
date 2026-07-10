@@ -36,7 +36,3 @@ def get_dimension(model: str) -> int:
 def get_embeddings_sync(texts: list[str], model: str) -> list[list[float]]:
     embedding_model = _get_model(model)
     return [embedding.tolist() for embedding in embedding_model.embed(texts)]
-
-
-async def get_embeddings(texts: list[str], model: str) -> list[list[float]]:
-    return get_embeddings_sync(texts, model)

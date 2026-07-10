@@ -83,6 +83,26 @@ def _apply_locations(
     return changed
 
 
+def _set_item_meta(
+    item: Item, title: str | None, source_type: str | None, context: str | None, expires_at: datetime | None
+) -> bool:
+    """Assign item metadata; returns True if any field changed."""
+    changed = (item.title, item.source_type, item.context, item.expires_at) != (title, source_type, context, expires_at)
+    item.title = title
+    item.source_type = source_type
+    item.context = context
+    item.expires_at = expires_at
+    return changed
+
+
+def _add_missing_tags(session, item_id: int, existing_tags: set[str], tags: list[str]) -> bool:
+    """Union-add tags the item doesn't have yet; returns True if any were added."""
+    missing = [t for t in tags if t not in existing_tags]
+    for tag_name in missing:
+        session.add(Tag(item_id=item_id, tag=tag_name))
+    return bool(missing)
+
+
 def _detach_item(session, item: Item) -> Item:
     """Load relationships and detach item from session for safe return."""
     _ = item.chunks
@@ -127,17 +147,7 @@ def add_item(
             changed = _apply_locations(session, existing.id, source_uri, machine, locations)
             existing_tags = {t.tag for t in existing.tags}
             if incoming is None:
-                if (title, source_type, context, expires_at) != (
-                    existing.title,
-                    existing.source_type,
-                    existing.context,
-                    existing.expires_at,
-                ):
-                    existing.title = title
-                    existing.source_type = source_type
-                    existing.context = context
-                    existing.expires_at = expires_at
-                    changed = True
+                changed = _set_item_meta(existing, title, source_type, context, expires_at) or changed
                 if existing_tags != set(tags):
                     changed = True
                     for tag in list(existing.tags):
@@ -148,14 +158,9 @@ def add_item(
                     existing.updated_at = datetime.utcnow()
             else:
                 if incoming > existing.updated_at:
-                    existing.title = title
-                    existing.source_type = source_type
-                    existing.context = context
-                    existing.expires_at = expires_at
+                    _set_item_meta(existing, title, source_type, context, expires_at)
                     existing.updated_at = incoming
-                for tag_name in tags:
-                    if tag_name not in existing_tags:
-                        session.add(Tag(item_id=existing.id, tag=tag_name))
+                _add_missing_tags(session, existing.id, existing_tags, tags)
 
             session.commit()
             session.refresh(existing)
@@ -169,11 +174,7 @@ def add_item(
         hash_match = session.exec(select(Item).where(Item.content_hash == new_hash)).first()
         if hash_match:
             changed = _apply_locations(session, hash_match.id, source_uri, machine, locations)
-            existing_tags = {t.tag for t in hash_match.tags}
-            for tag_name in tags:
-                if tag_name not in existing_tags:
-                    session.add(Tag(item_id=hash_match.id, tag=tag_name))
-                    changed = True
+            changed = _add_missing_tags(session, hash_match.id, {t.tag for t in hash_match.tags}, tags) or changed
             if incoming is not None:
                 hash_match.updated_at = max(hash_match.updated_at, incoming)
             elif changed:
@@ -244,7 +245,7 @@ def ingest_record(
     Does NOT init the DB — the caller must call init_db() once before looping.
     """
     tags = (record.tags + (extra_tags or [])) or None  # add_item dedups
-    # Records carrying locations (import streams) keep their origin machines; don't stamp the local host.
+    # A record that declares its locations owns its provenance; don't stamp the local host over it.
     machine = record.machine or (None if record.locations else default_machine or get_machine_id())
     return add_item(
         source_uri=record.source_uri,
@@ -280,6 +281,12 @@ def ingest_records(
 
     precomputed, if given, may supply ready-made vectors for a record (import
     pass-through); records it returns None for are batch-embedded as usual.
+
+    Fast path: records whose (content_hash, source_uri) already exist are counted
+    "unchanged" without touching the item at all — a re-run over an already-indexed
+    source skips per-record DB work entirely. Disabled per record when extra_tags
+    are given or the record carries sync provenance (updated_at/locations), since
+    those must still merge into the existing item.
     """
     counts: dict[IngestStatus, int] = {"added": 0, "unchanged": 0, "merged": 0}
     batch: list[tuple[Record, str]] = []
@@ -289,7 +296,10 @@ def ingest_records(
             return
         hashes = {h for _, h in batch}
         with get_session() as session:
-            known = set(session.exec(select(Item.content_hash).where(Item.content_hash.in_(hashes))).all())
+            known_pairs = set(
+                session.exec(select(Item.content_hash, Item.source_uri).where(Item.content_hash.in_(hashes))).all()
+            )
+        known = {h for h, _ in known_pairs}
         to_embed = {h: rec for rec, h in batch if h not in known}  # one representative per unique new hash
         embeddings_by_hash = {}
         if precomputed:
@@ -299,7 +309,13 @@ def ingest_records(
         embedded = iter(get_embeddings_sync(texts)) if texts else iter(())
         embeddings_by_hash |= {h: [next(embedded) for _ in rec.chunks] for h, rec in to_embed.items()}
         for rec, h in batch:
-            _, status = ingest_record(rec, extra_tags=extra_tags, embeddings=embeddings_by_hash.get(h), content_hash=h)
+            skippable = not extra_tags and rec.updated_at is None and rec.locations is None
+            if skippable and (h, rec.source_uri) in known_pairs:
+                status = "unchanged"
+            else:
+                _, status = ingest_record(
+                    rec, extra_tags=extra_tags, embeddings=embeddings_by_hash.get(h), content_hash=h
+                )
             counts[status] += 1
             if on_result:
                 on_result(rec, status)

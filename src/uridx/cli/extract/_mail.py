@@ -28,6 +28,9 @@ from uridx.record import ChunkInput, Record
 from .base import split_text
 
 MAX_CHARS = 2000
+# Cap chunks per message: machine-generated mail (log/report bodies) can run to
+# megabytes; index the head so the message stays findable, tag it `truncated`.
+MAX_CHUNKS = 200
 
 _ID_RE = re.compile(r"<([^>]+)>")
 _RE_PREFIX = re.compile(r"^(?:(?:re|fwd?|aw|sv)\s*:\s*)+", re.IGNORECASE)
@@ -192,7 +195,8 @@ def _clean_subject(subject: str) -> str:
     return _RE_PREFIX.sub("", subject.strip()).strip()
 
 
-def _message_chunks(m: Msg) -> list[ChunkInput]:
+def _message_chunks(m: Msg) -> tuple[list[ChunkInput], bool]:
+    """Chunk the message text, capped at MAX_CHUNKS; returns (chunks, truncated)."""
     header = [f"From: {m.from_addr}"]
     if m.to:
         header.append(f"To: {m.to}")
@@ -204,12 +208,15 @@ def _message_chunks(m: Msg) -> list[ChunkInput]:
         header.append(f"Subject: {m.subject}")
     text = "\n".join(header) + "\n\n" + m.body
     meta = {"message_id": m.message_id}
-    return [ChunkInput(text=piece, key=str(i), meta=meta) for i, piece in enumerate(split_text(text, MAX_CHARS))]
+    pieces = split_text(text, MAX_CHARS)
+    chunks = [ChunkInput(text=piece, key=str(i), meta=meta) for i, piece in enumerate(pieces[:MAX_CHUNKS])]
+    return chunks, len(pieces) > MAX_CHUNKS
 
 
 def build_message_record(m: Msg, *, account: str, junk_signals: set[str], user_tags: list[str]) -> Record:
     title = _clean_subject(m.subject)
     junk = sorted(junk_signals)
+    chunks, truncated = _message_chunks(m)
     context = {
         "subject": title,
         "from": m.from_addr,
@@ -224,9 +231,12 @@ def build_message_record(m: Msg, *, account: str, junk_signals: set[str], user_t
         "junk": junk,
     }
     tags = list(dict.fromkeys(["email", account, m.folder, f"thread:{m.thread_id}", *user_tags, *junk]))
+    if truncated:
+        context["truncated"] = True
+        tags.append("truncated")
     return Record(
         source_uri=f"email://{account}/{m.message_id}",
-        chunks=_message_chunks(m),
+        chunks=chunks,
         title=title or None,
         source_type="email",
         context=json.dumps(context),
