@@ -26,6 +26,9 @@ def normalize_ollama_url(url: str) -> str:
 
 URIDX_MIN_SCORE: float | None = float(v) if (v := os.getenv("URIDX_MIN_SCORE")) else None
 
+# Candidates fetched by the coarse binary-vector pass before exact rescoring.
+URIDX_RESCORE_K = int(os.getenv("URIDX_RESCORE_K", "500"))
+
 
 def get_machine_id() -> str:
     return os.getenv("URIDX_MACHINE") or socket.gethostname()

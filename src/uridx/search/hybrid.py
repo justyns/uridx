@@ -3,7 +3,7 @@ from datetime import datetime, timezone
 
 from sqlmodel import select
 
-from uridx.config import URIDX_MIN_SCORE
+from uridx.config import URIDX_MIN_SCORE, URIDX_RESCORE_K
 from uridx.db.engine import get_raw_connection, get_session
 from uridx.db.models import Chunk, Item, Tag
 from uridx.embeddings import get_embeddings_sync, serialize_embedding
@@ -99,6 +99,30 @@ def _list_results(
         ]
 
 
+def _vector_search(cursor, embedding_blob: bytes, limit: int) -> list[tuple[int, float]]:
+    """Two-stage KNN: coarse hamming scan over sign-bit vectors, exact rescore of the survivors.
+
+    The bit vectors are 32x smaller than the floats, so the full-table pass is cheap;
+    only the URIDX_RESCORE_K coarse candidates pay full float distance math.
+    """
+    query_bits = cursor.execute("SELECT vec_quantize_binary(?)", (embedding_blob,)).fetchone()[0]
+    cursor.execute(
+        "SELECT chunk_id FROM chunk_embeddings_bq "
+        "ORDER BY vec_distance_hamming(vec_bit(embedding), vec_bit(?)) LIMIT ?",
+        (query_bits, max(URIDX_RESCORE_K, limit)),
+    )
+    candidates = [row[0] for row in cursor.fetchall()]
+    if not candidates:
+        return []
+    placeholders = ",".join("?" * len(candidates))
+    cursor.execute(
+        f"SELECT chunk_id, vec_distance_l2(embedding, ?) AS distance FROM chunk_embeddings "
+        f"WHERE chunk_id IN ({placeholders}) ORDER BY distance LIMIT ?",
+        (embedding_blob, *candidates, limit),
+    )
+    return cursor.fetchall()
+
+
 def _fts_search(cursor, fts_query: str, limit: int) -> list[tuple[int, float]]:
     if not fts_query:
         return []
@@ -135,11 +159,7 @@ def hybrid_search(
         query_embedding = get_embeddings_sync([query])[0]
         embedding_blob = serialize_embedding(query_embedding)
 
-        cursor.execute(
-            "SELECT chunk_id, distance FROM chunk_embeddings WHERE embedding MATCH ? ORDER BY distance LIMIT ?",
-            (embedding_blob, limit * 3),
-        )
-        vec_results = cursor.fetchall()
+        vec_results = _vector_search(cursor, embedding_blob, limit * 3)
 
         fts_results = _fts_search(cursor, fts_query, limit)
         ranked_chunks = _rrf([vec_results, fts_results])

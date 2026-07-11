@@ -37,4 +37,5 @@ uv run uridx --help                  # CLI help
 
 **Database Schema**:
 - Regular tables: `item`, `chunk`, `tag`, `setting` (via SQLModel)
-- Virtual tables: `chunk_embeddings` (vec0), `chunks_fts` (fts5 with triggers)
+- Virtual tables: `chunks_fts` (fts5 with triggers)
+- Vector tables (plain, not vec0 — sqlite-vec is used only for its scalar functions): `chunk_embeddings` (float32 blobs — exact rescore + export) and `chunk_embeddings_bq` (derived sign-bit blobs — coarse hamming pass; auto-healed by `init_db` when it drifts)

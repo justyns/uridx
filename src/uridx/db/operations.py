@@ -39,15 +39,15 @@ def _delete_chunk_embeddings(chunk_ids: list[int]) -> None:
     cursor = conn.cursor()
     placeholders = ",".join("?" * len(chunk_ids))
     cursor.execute(f"DELETE FROM chunk_embeddings WHERE chunk_id IN ({placeholders})", chunk_ids)
+    cursor.execute(f"DELETE FROM chunk_embeddings_bq WHERE chunk_id IN ({placeholders})", chunk_ids)
     conn.commit()
     conn.close()
 
 
 def _insert_chunk_embeddings(cursor, pairs: Iterable[tuple[int, list[float]]]) -> None:
-    cursor.executemany(
-        "INSERT INTO chunk_embeddings (chunk_id, embedding) VALUES (?, ?)",
-        [(chunk_id, serialize_embedding(embedding)) for chunk_id, embedding in pairs],
-    )
+    rows = [(chunk_id, serialize_embedding(embedding)) for chunk_id, embedding in pairs]
+    cursor.executemany("INSERT INTO chunk_embeddings (chunk_id, embedding) VALUES (?, ?)", rows)
+    cursor.executemany("INSERT INTO chunk_embeddings_bq (chunk_id, embedding) VALUES (?, vec_quantize_binary(?))", rows)
 
 
 def read_chunk_embeddings(conn, chunk_ids: list[int]) -> dict[int, bytes]:
@@ -393,7 +393,8 @@ def reindex_embeddings(batch_size: int = EMBED_BATCH_CHUNKS, on_progress=None) -
     conn = get_raw_connection()
     cursor = conn.cursor()
     cursor.execute("DROP TABLE IF EXISTS chunk_embeddings")
-    create_embeddings_table(cursor, dim)
+    cursor.execute("DROP TABLE IF EXISTS chunk_embeddings_bq")
+    create_embeddings_table(cursor)
     conn.commit()
 
     with get_session() as session:

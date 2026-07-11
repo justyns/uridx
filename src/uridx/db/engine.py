@@ -74,16 +74,72 @@ def _ensure_fts_table(cursor):
             cursor.execute("INSERT INTO chunks_fts(rowid, text) SELECT id, text FROM chunk")
 
 
-def create_embeddings_table(cursor, dim: int) -> None:
-    """Create the vec0 virtual table — the one definition of the vector schema."""
-    cursor.execute(
-        f"""
-        CREATE VIRTUAL TABLE chunk_embeddings USING vec0(
-            chunk_id INTEGER PRIMARY KEY,
-            embedding float[{dim}]
+def create_embeddings_table(cursor) -> None:
+    """Create the vector tables — the one definition of the vector schema.
+
+    Both are plain tables on purpose (sqlite-vec is used only for its scalar
+    functions): vec0 virtual tables cost ~2x more to scan row-by-row and read a
+    multi-MB vector chunk per point lookup, which made rescoring 100x slower.
+    chunk_embeddings holds float32 blobs (exact rescoring, export); the derived
+    chunk_embeddings_bq holds sign-bit blobs for the coarse hamming pass.
+    Dimension is recorded in settings, not the schema.
+    """
+    cursor.execute("CREATE TABLE chunk_embeddings (chunk_id INTEGER PRIMARY KEY, embedding BLOB)")
+    cursor.execute("CREATE TABLE chunk_embeddings_bq (chunk_id INTEGER PRIMARY KEY, embedding BLOB)")
+
+
+def _migrate_vec0_table(cursor) -> None:
+    """One-time rebuild of a legacy vec0 chunk_embeddings into a plain table.
+
+    Copies in batches (keyset by chunk_id) to keep the WAL bounded; a partial
+    prior attempt (chunk_embeddings_new left behind) is discarded and restarted.
+    """
+    cursor.execute("DROP TABLE IF EXISTS chunk_embeddings_new")
+    cursor.execute("CREATE TABLE chunk_embeddings_new (chunk_id INTEGER PRIMARY KEY, embedding BLOB)")
+    last_id = 0
+    while True:
+        rows = cursor.execute(
+            "SELECT chunk_id, embedding FROM chunk_embeddings WHERE chunk_id > ? ORDER BY chunk_id LIMIT 5000",
+            (last_id,),
+        ).fetchall()
+        if not rows:
+            break
+        cursor.executemany("INSERT INTO chunk_embeddings_new VALUES (?, ?)", rows)
+        cursor.connection.commit()
+        last_id = rows[-1][0]
+    cursor.execute("DROP TABLE chunk_embeddings")
+    cursor.execute("ALTER TABLE chunk_embeddings_new RENAME TO chunk_embeddings")
+    cursor.connection.commit()
+
+
+def _ensure_vector_tables(cursor) -> None:
+    """Migrate legacy vec0 tables to plain ones and re-derive the bit table on drift.
+
+    Drift happens when an older writer fills only the float table (or deletes
+    from it); bit vectors are pure derived data, so a wholesale rebuild is
+    always safe and cheap (one pass of vec_quantize_binary).
+    """
+    float_sql = cursor.execute(
+        "SELECT sql FROM sqlite_master WHERE type='table' AND name='chunk_embeddings'"
+    ).fetchone()[0]
+    if "VIRTUAL" in float_sql.upper():
+        _migrate_vec0_table(cursor)
+    bq_row = cursor.execute(
+        "SELECT sql FROM sqlite_master WHERE type='table' AND name='chunk_embeddings_bq'"
+    ).fetchone()
+    if bq_row and "VIRTUAL" in (bq_row[0] or "").upper():
+        cursor.execute("DROP TABLE chunk_embeddings_bq")  # early vec0-based variant
+        bq_row = None
+    if not bq_row:
+        cursor.execute("CREATE TABLE chunk_embeddings_bq (chunk_id INTEGER PRIMARY KEY, embedding BLOB)")
+    n_float = cursor.execute("SELECT count(*) FROM chunk_embeddings").fetchone()[0]
+    n_bq = cursor.execute("SELECT count(*) FROM chunk_embeddings_bq").fetchone()[0]
+    if n_bq != n_float:
+        cursor.execute("DELETE FROM chunk_embeddings_bq")
+        cursor.execute(
+            "INSERT INTO chunk_embeddings_bq (chunk_id, embedding) "
+            "SELECT chunk_id, vec_quantize_binary(embedding) FROM chunk_embeddings"
         )
-        """
-    )
 
 
 def _set_sqlite_pragmas(dbapi_conn, connection_record):
@@ -199,7 +255,9 @@ def init_db():
 
     cursor.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='chunk_embeddings'")
     if not cursor.fetchone():
-        create_embeddings_table(cursor, embed_dim)
+        create_embeddings_table(cursor)
+    else:
+        _ensure_vector_tables(cursor)
 
     _ensure_fts_table(cursor)
 
