@@ -8,10 +8,12 @@ Personal semantic search index CLI. Index your notes, chats, code, and documents
 uv sync
 ```
 
-Requires [Ollama](https://ollama.ai/) running locally with an embedding model:
+Embeddings run locally via [fastembed](https://github.com/qdrant/fastembed) by default. To use
+[Ollama](https://ollama.ai/) instead:
 
 ```bash
 ollama pull qwen3-embedding:0.6b
+export URIDX_EMBEDDINGS=ollama
 ```
 
 ## CLI Usage
@@ -50,10 +52,10 @@ uridx extract markdown ./notes/ --tag memory --tag 2026-03 | uridx ingest
 echo "test" | uridx ingest --text "test://uri" --tag custom --tag notes
 ```
 
-Email archives (use `-j` for parallel parsing on big backfills; `--newer-than` for cron):
+Some extractors (only maildir right now) support `-j` for parallel reading/extracting.
 ```bash
-uridx extract maildir ~/Mail/Fastmail -j 8 | uridx ingest
-uridx extract maildir ~/Mail/Fastmail --newer-than 7d | uridx ingest
+uridx extract maildir ~/Mail -j 8 | uridx ingest
+uridx extract maildir ~/Mail -j 4 --newer-than 7d | uridx ingest
 ```
 
 ### Extract documents with docling
@@ -139,14 +141,29 @@ chunk text, so machines may run different models.
 
 Environment variables:
 
-| Variable | Default | Description |
-|----------|---------|-------------|
-| `URIDX_DB_PATH` | `~/.local/share/uridx/uridx.db` | SQLite database path |
-| `OLLAMA_BASE_URL` | `http://localhost:11434` | Ollama API URL |
-| `OLLAMA_EMBED_MODEL` | `qwen3-embedding:0.6b` | Embedding model |
-| `URIDX_MIN_SCORE` | (none) | Global minimum score threshold for search results |
+| Variable               | Default                          | Description                                             |
+|------------------------|----------------------------------|---------------------------------------------------------|
+| `URIDX_DB_PATH`        | `~/.local/share/uridx/uridx.db`  | SQLite database path                                    |
+| `URIDX_EMBEDDINGS`     | `fastembed`                      | Embedding backend: `fastembed` (local CPU) or `ollama`  |
+| `FASTEMBED_MODEL`      | `nomic-ai/nomic-embed-text-v1.5` | fastembed model name                                    |
+| `FASTEMBED_CACHE_PATH` | `/tmp/fastembed_cache`           | fastembed model download cache (set to survive reboots) |
+| `OLLAMA_BASE_URL`      | `http://localhost:11434`         | Ollama API URL                                          |
+| `OLLAMA_EMBED_MODEL`   | `qwen3-embedding:0.6b`           | Ollama embedding model                                  |
+| `URIDX_MACHINE`        | (hostname)                       | Machine label recorded in item locations (sync)         |
+| `URIDX_RESCORE_K`      | `500`                            | Coarse vector candidates rescored per semantic search   |
+| `URIDX_MIN_SCORE`      | (none)                           | Global minimum score threshold for search results       |
 
 Example with remote Ollama:
 ```bash
 OLLAMA_BASE_URL=http://my-server:11434 uridx search "test"
 ```
+
+### Embedding backends
+
+fastembed (default) runs ONNX models on the local CPU. The first embed downloads the model to
+`FASTEMBED_CACHE_PATH`; set it somewhere persistent, the `/tmp` default is wiped on reboot.
+Set `URIDX_EMBEDDINGS=ollama` to use an Ollama server instead.
+
+The index is stamped with its embedding model. Switching backends or models requires
+`uridx reindex`. Machines can use different backends: `import` re-embeds locally unless
+the stream's model matches exactly.
