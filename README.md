@@ -50,6 +50,12 @@ uridx extract markdown ./notes/ --tag memory --tag 2026-03 | uridx ingest
 echo "test" | uridx ingest --text "test://uri" --tag custom --tag notes
 ```
 
+Email archives (use `-j` for parallel parsing on big backfills; `--newer-than` for cron):
+```bash
+uridx extract maildir ~/Mail/Fastmail -j 8 | uridx ingest
+uridx extract maildir ~/Mail/Fastmail --newer-than 7d | uridx ingest
+```
+
 ### Extract documents with docling
 
 [Docling](https://github.com/docling-project/docling) handles PDFs, DOCX, XLSX, PPTX, HTML, images, and more with OCR and table extraction:

@@ -245,6 +245,26 @@ def build_message_record(m: Msg, *, account: str, junk_signals: set[str], user_t
     )
 
 
+def message_record(
+    msg: EmailMessage,
+    folder: str,
+    *,
+    account: str,
+    junk_mode: JunkMode = JunkMode.skip,
+    since: datetime | None = None,
+    user_tags: list[str] | None = None,
+) -> Record | None:
+    """Parse and filter one message; returns its Record, or None if filtered out."""
+    m = parse_message(msg, folder)
+    if since and (m.date is None or m.date < since):
+        return None
+    if m.junk and junk_mode == JunkMode.skip:
+        return None
+    signals = m.junk if junk_mode == JunkMode.tag else set()
+    rec = build_message_record(m, account=account, junk_signals=signals, user_tags=user_tags or [])
+    return rec if rec.chunks else None
+
+
 def iter_message_records(
     messages: Iterable[tuple[EmailMessage, str]],
     *,
@@ -255,14 +275,8 @@ def iter_message_records(
 ) -> Iterator[Record]:
     """Parse, filter junk, and yield one Record per message (streaming)."""
     for msg, folder in messages:
-        m = parse_message(msg, folder)
-        if since and (m.date is None or m.date < since):
-            continue
-        if m.junk and junk_mode == JunkMode.skip:
-            continue
-        signals = m.junk if junk_mode == JunkMode.tag else set()
-        rec = build_message_record(m, account=account, junk_signals=signals, user_tags=user_tags or [])
-        if rec.chunks:
+        rec = message_record(msg, folder, account=account, junk_mode=junk_mode, since=since, user_tags=user_tags)
+        if rec is not None:
             yield rec
 
 
