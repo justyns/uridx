@@ -263,6 +263,16 @@ def ingest_record(
     )
 
 
+def _ensure_title_chunk(record: Record) -> None:
+    """Prepend the title as its own chunk so it's searchable (FTS + vector).
+
+    Skipped when a "title" chunk already exists (import round-trips). Runs
+    before hashing, so a title change is a content change.
+    """
+    if record.title and not any(c.key == "title" for c in record.chunks):
+        record.chunks.insert(0, ChunkInput(text=record.title, key="title"))
+
+
 def ingest_records(
     records: Iterable[Record],
     *,
@@ -323,6 +333,7 @@ def ingest_records(
 
     try:
         for record in records:
+            _ensure_title_chunk(record)
             batch.append((record, compute_content_hash(record.chunks)))
             if sum(len(rec.chunks) for rec, _ in batch) >= batch_chunks:
                 flush()
