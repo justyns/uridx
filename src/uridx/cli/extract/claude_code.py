@@ -94,6 +94,7 @@ def _parse_conversation(jsonl_path: Path) -> ParsedConversation | None:
     metadata = {}
     first_timestamp = None
     last_timestamp = None
+    ai_title = None
 
     with open(jsonl_path, encoding="utf-8") as f:
         for line in f:
@@ -103,9 +104,13 @@ def _parse_conversation(jsonl_path: Path) -> ParsedConversation | None:
             try:
                 msg = json.loads(line)
                 messages.append(msg)
-                if first_timestamp is None:
-                    first_timestamp = msg.get("timestamp")
-                last_timestamp = msg.get("timestamp")
+                ts = msg.get("timestamp")
+                if ts:
+                    if first_timestamp is None:
+                        first_timestamp = ts
+                    last_timestamp = ts
+                if msg.get("type") == "ai-title" and msg.get("aiTitle"):
+                    ai_title = msg["aiTitle"]
                 if not metadata and msg.get("cwd"):
                     metadata = {
                         "project_path": msg.get("cwd"),
@@ -124,7 +129,7 @@ def _parse_conversation(jsonl_path: Path) -> ParsedConversation | None:
     if not chunks:
         return None
 
-    title = metadata.get("slug") or jsonl_path.stem
+    title = ai_title or metadata.get("slug") or jsonl_path.stem
     metadata["started_at"] = first_timestamp
     metadata["ended_at"] = last_timestamp
 
