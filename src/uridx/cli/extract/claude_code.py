@@ -3,6 +3,7 @@
 import json
 import sys
 from dataclasses import dataclass
+from datetime import datetime
 from pathlib import Path
 from typing import Annotated, Optional
 
@@ -10,16 +11,17 @@ import typer
 
 from uridx.record import ChunkInput, Record
 
-from .base import filter_existing, output
+from .base import as_utc, filter_existing, output
 
 
 @dataclass
 class ParsedConversation:
-    """A parsed Claude Code conversation: turn chunks, title, and metadata."""
+    """A parsed Claude Code conversation: turn chunks, title, metadata, and last activity."""
 
     chunks: list[ChunkInput]
     title: str
     metadata: dict
+    last_active: datetime | None
 
 
 def _extract_content(message: dict) -> str:
@@ -133,11 +135,22 @@ def _parse_conversation(jsonl_path: Path) -> ParsedConversation | None:
     metadata["started_at"] = first_timestamp
     metadata["ended_at"] = last_timestamp
 
-    return ParsedConversation(chunks=chunks, title=title, metadata=metadata)
+    return ParsedConversation(
+        chunks=chunks, title=title, metadata=metadata, last_active=as_utc(last_timestamp or first_timestamp)
+    )
 
 
 def extract(
     path: Annotated[Optional[Path], typer.Argument(help="Projects directory")] = None,
+    since: Annotated[
+        Optional[datetime],
+        typer.Option(
+            "--since",
+            "-s",
+            formats=["%Y-%m-%d"],
+            help="Only conversations with activity on/after this date (uses file mtime to skip old files)",
+        ),
+    ] = None,
     force: Annotated[bool, typer.Option("--force", "-f", help="Re-process all files even if already ingested")] = False,
     tag: Annotated[Optional[list[str]], typer.Option("--tag", "-t", help="Additional tags")] = None,
 ):
@@ -148,6 +161,9 @@ def extract(
         print(f"Projects directory not found: {projects_dir}", file=sys.stderr)
         raise typer.Exit(1)
 
+    since_dt = as_utc(since)
+    cutoff_mtime = since_dt.timestamp() if since_dt else None
+
     # Build list of source_uris that will be generated
     source_uri_map: dict[str, tuple[Path, str]] = {}  # uri -> (jsonl_file, project_hash)
     for project_dir in projects_dir.iterdir():
@@ -155,7 +171,11 @@ def extract(
             continue
         project_hash = project_dir.name
         for jsonl_file in project_dir.glob("*.jsonl"):
-            if jsonl_file.stat().st_size == 0:
+            st = jsonl_file.stat()
+            if st.st_size == 0:
+                continue
+            # cheap prefilter: a file written normally has mtime >= its last message
+            if cutoff_mtime is not None and st.st_mtime < cutoff_mtime:
                 continue
             uri = f"claude-code://{project_hash}/{jsonl_file.stem}"
             source_uri_map[uri] = (jsonl_file, project_hash)
@@ -172,6 +192,10 @@ def extract(
             continue
 
         if not result or not result.chunks:
+            continue
+
+        # a fresh mtime can outlive the conversation itself (copies, later rewrites)
+        if since_dt and (result.last_active is None or result.last_active < since_dt):
             continue
 
         output(

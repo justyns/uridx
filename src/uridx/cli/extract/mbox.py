@@ -3,14 +3,15 @@
 import mailbox
 import sys
 from collections.abc import Iterator
+from datetime import datetime
 from email.message import EmailMessage
 from pathlib import Path
 from typing import Annotated, Optional
 
 import typer
 
-from ._mail import JunkMode, iter_message_records, parse_bytes, parse_since
-from .base import output
+from ._mail import JunkMode, iter_message_records, parse_bytes
+from .base import as_utc, output
 
 
 def _iter_messages(path: Path) -> Iterator[tuple[EmailMessage, str]]:
@@ -36,16 +37,12 @@ def extract(
     ] = None,
     junk: Annotated[JunkMode, typer.Option("--junk", help="Junk handling")] = JunkMode.skip,
     since: Annotated[
-        Optional[str], typer.Option("--since", "-s", help="Only mail on/after this date (YYYY-MM-DD)")
+        Optional[datetime], typer.Option("--since", "-s", formats=["%Y-%m-%d"], help="Only mail on/after this date")
     ] = None,
     tag: Annotated[Optional[list[str]], typer.Option("--tag", "-t", help="Additional tags")] = None,
 ):
     """Extract email messages from one or more mbox files."""
-    try:
-        since_dt = parse_since(since)
-    except ValueError as e:
-        print(str(e), file=sys.stderr)
-        raise typer.Exit(1)
+    since_dt = as_utc(since)
 
     for path in paths:
         if not path.is_file():

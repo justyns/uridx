@@ -90,7 +90,8 @@ def extract(
     ] = None,
     agent: Annotated[Optional[str], typer.Option("--agent", "-a", help="Filter by agent name")] = None,
     since: Annotated[
-        Optional[str], typer.Option("--since", "-s", help="Only sessions created on/after this date (YYYY-MM-DD)")
+        Optional[datetime],
+        typer.Option("--since", "-s", formats=["%Y-%m-%d"], help="Only sessions created on/after this date"),
     ] = None,
     force: Annotated[bool, typer.Option("--force", "-f", help="Re-process all sessions")] = False,
     tag: Annotated[Optional[list[str]], typer.Option("--tag", "-t", help="Additional tags")] = None,
@@ -101,13 +102,6 @@ def extract(
         print(f"Tsugite history database not found: {db_path}", file=sys.stderr)
         raise typer.Exit(1)
 
-    if since:
-        try:
-            datetime.strptime(since, "%Y-%m-%d")
-        except ValueError:
-            print(f"Invalid date format: {since} (expected YYYY-MM-DD)", file=sys.stderr)
-            raise typer.Exit(1)
-
     conn = _connect_ro(db_path)
 
     clauses, params = [], []
@@ -116,7 +110,7 @@ def extract(
         params.append(agent)
     if since:
         clauses.append("created_at >= ?")  # created_at is ISO-8601 UTC, so string compare is chronological
-        params.append(since)
+        params.append(since.strftime("%Y-%m-%d"))
     where = (" WHERE " + " AND ".join(clauses)) if clauses else ""
     sessions = conn.execute(
         f"SELECT session_id, agent, model, workspace, created_at, ended_at, status FROM sessions{where} "
