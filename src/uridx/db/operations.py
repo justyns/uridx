@@ -1,16 +1,32 @@
+"""Reading and writing the index.
+
+Two merge policies run through the write path, selected by whether an incoming record
+carries an `updated_at`:
+
+- **local** (no `updated_at`) — this machine just read the source, so it is
+  authoritative: metadata is overwritten, the tag set is replaced wholesale, and
+  `updated_at` bumps to now whenever something actually changed.
+- **sync** (`updated_at` present) — the record came from another machine's index, so
+  metadata competes on timestamp (last writer wins) and tags union. A peer that never
+  saw a tag must not delete it, and re-importing unchanged data must not mark the item
+  dirty, or every sync would echo back out on the next export.
+"""
+
 import hashlib
 import json
 from collections.abc import Callable, Iterable
-from datetime import datetime, timezone
+from datetime import datetime
 from typing import Literal
 
 from sqlmodel import func, select
 
 from uridx.config import get_machine_id
-from uridx.db.engine import create_embeddings_table, get_raw_connection, get_session
+from uridx.db.engine import get_session
 from uridx.db.models import Chunk, Item, Location, Setting, Tag
+from uridx.db.schema import create_embeddings_tables
 from uridx.embeddings import get_dimension, get_embeddings_sync, get_model_id, serialize_embedding
-from uridx.record import ChunkInput, LocationInput, Record
+from uridx.record import TITLE_CHUNK_KEY, ChunkInput, Record
+from uridx.timeutil import to_naive_utc, utcnow
 
 IngestStatus = Literal["added", "unchanged", "merged"]
 
@@ -23,59 +39,56 @@ def compute_content_hash(chunks: list[ChunkInput]) -> str:
     return hashlib.sha256(content.encode()).hexdigest()[:32]
 
 
-def parse_timestamp(value: datetime | str | None) -> datetime | None:
-    """Parse an ISO timestamp to the naive-UTC datetimes stored in the DB."""
-    if isinstance(value, str):
-        value = datetime.fromisoformat(value.replace("Z", "+00:00"))
-    if value is not None and value.tzinfo is not None:
-        value = value.astimezone(timezone.utc).replace(tzinfo=None)
-    return value
-
-
-def _delete_chunk_embeddings(chunk_ids: list[int]) -> None:
+def _delete_chunk_embeddings(session, chunk_ids: list[int]) -> None:
+    """Drop both vector rows for these chunks, in the caller's transaction."""
     if not chunk_ids:
         return
-    conn = get_raw_connection()
-    cursor = conn.cursor()
+    conn = session.connection()
     placeholders = ",".join("?" * len(chunk_ids))
-    cursor.execute(f"DELETE FROM chunk_embeddings WHERE chunk_id IN ({placeholders})", chunk_ids)
-    cursor.execute(f"DELETE FROM chunk_embeddings_bq WHERE chunk_id IN ({placeholders})", chunk_ids)
-    conn.commit()
-    conn.close()
+    params = tuple(chunk_ids)
+    conn.exec_driver_sql(f"DELETE FROM chunk_embeddings WHERE chunk_id IN ({placeholders})", params)
+    conn.exec_driver_sql(f"DELETE FROM chunk_embeddings_bq WHERE chunk_id IN ({placeholders})", params)
 
 
-def _insert_chunk_embeddings(cursor, pairs: Iterable[tuple[int, list[float]]]) -> None:
+def _insert_chunk_embeddings(session, pairs: Iterable[tuple[int, list[float]]]) -> None:
+    """Write the float vectors and their derived bit vectors, in the caller's transaction."""
     rows = [(chunk_id, serialize_embedding(embedding)) for chunk_id, embedding in pairs]
-    cursor.executemany("INSERT INTO chunk_embeddings (chunk_id, embedding) VALUES (?, ?)", rows)
-    cursor.executemany("INSERT INTO chunk_embeddings_bq (chunk_id, embedding) VALUES (?, vec_quantize_binary(?))", rows)
+    if not rows:
+        return
+    conn = session.connection()
+    conn.exec_driver_sql("INSERT INTO chunk_embeddings (chunk_id, embedding) VALUES (?, ?)", rows)
+    conn.exec_driver_sql(
+        "INSERT INTO chunk_embeddings_bq (chunk_id, embedding) VALUES (?, vec_quantize_binary(?))", rows
+    )
 
 
-def read_chunk_embeddings(conn, chunk_ids: list[int]) -> dict[int, bytes]:
+def read_chunk_embeddings(session, chunk_ids: list[int]) -> dict[int, bytes]:
     """Read stored embedding blobs by chunk id (export pass-through)."""
     if not chunk_ids:
         return {}
     placeholders = ",".join("?" * len(chunk_ids))
-    rows = conn.execute(
-        f"SELECT chunk_id, embedding FROM chunk_embeddings WHERE chunk_id IN ({placeholders})", chunk_ids
-    ).fetchall()
-    return dict(rows)
+    rows = session.connection().exec_driver_sql(
+        f"SELECT chunk_id, embedding FROM chunk_embeddings WHERE chunk_id IN ({placeholders})", tuple(chunk_ids)
+    )
+    return {chunk_id: blob for chunk_id, blob in rows}
 
 
-def _apply_locations(
-    session, item_id: int, source_uri: str, machine: str | None, locations: list[LocationInput] | None
-) -> bool:
+def _apply_locations(session, item: Item, record: Record) -> bool:
     """Add missing locations and backfill null machines; never overwrite a known origin.
 
-    Returns True if anything changed."""
-    wanted: dict[str, str | None] = {source_uri: machine}
-    for loc in locations or []:
+    A record that declares its own locations already carries its provenance, so the
+    local hostname is not stamped over it. Returns True if anything changed.
+    """
+    machine = record.machine or (None if record.locations else get_machine_id())
+    wanted: dict[str, str | None] = {record.source_uri: machine}
+    for loc in record.locations or []:
         wanted[loc.uri] = wanted.get(loc.uri) or loc.machine
-    existing = {loc.uri: loc for loc in session.exec(select(Location).where(Location.item_id == item_id))}
+    existing = {loc.uri: loc for loc in session.exec(select(Location).where(Location.item_id == item.id))}
     changed = False
     for uri, mach in wanted.items():
         row = existing.get(uri)
         if row is None:
-            session.add(Location(item_id=item_id, uri=uri, machine=mach))
+            session.add(Location(item_id=item.id, uri=uri, machine=mach))
             changed = True
         elif mach and row.machine is None:
             row.machine = mach
@@ -83,24 +96,47 @@ def _apply_locations(
     return changed
 
 
-def _set_item_meta(
-    item: Item, title: str | None, source_type: str | None, context: str | None, expires_at: datetime | None
-) -> bool:
-    """Assign item metadata; returns True if any field changed."""
-    changed = (item.title, item.source_type, item.context, item.expires_at) != (title, source_type, context, expires_at)
-    item.title = title
-    item.source_type = source_type
-    item.context = context
-    item.expires_at = expires_at
+def _set_item_meta(item: Item, record: Record) -> bool:
+    """Copy the record's metadata onto the item; returns True if any field changed."""
+    incoming = (record.title, record.source_type, record.context)
+    changed = (item.title, item.source_type, item.context) != incoming
+    item.title, item.source_type, item.context = incoming
     return changed
 
 
-def _add_missing_tags(session, item_id: int, existing_tags: set[str], tags: list[str]) -> bool:
-    """Union-add tags the item doesn't have yet; returns True if any were added."""
-    missing = [t for t in tags if t not in existing_tags]
-    for tag_name in missing:
-        session.add(Tag(item_id=item_id, tag=tag_name))
-    return bool(missing)
+def _reconcile_tags(session, item: Item, tags: list[str], *, replace: bool) -> bool:
+    """Bring the item's tags in line with `tags`; returns True if anything changed.
+
+    Local writes own the tag set outright (replace); sync writes union, so importing
+    from a peer that never saw a tag can't delete it. See the module docstring.
+    """
+    existing = {t.tag for t in item.tags}
+    if not replace:
+        missing = [t for t in tags if t not in existing]
+        for tag_name in missing:
+            session.add(Tag(item_id=item.id, tag=tag_name))
+        return bool(missing)
+
+    if existing == set(tags):
+        return False
+    for tag in list(item.tags):
+        session.delete(tag)
+    for tag_name in tags:
+        session.add(Tag(item_id=item.id, tag=tag_name))
+    return True
+
+
+def _advance_updated_at(item: Item, incoming: datetime | None, changed: bool) -> None:
+    """Move the item's clock forward under whichever policy applies.
+
+    Local writes bump to now only when something actually changed; sync writes take
+    the incoming stamp but never move backwards, so a repeated import of an unchanged
+    record leaves the item clean and doesn't echo back out on the next export.
+    """
+    if incoming is not None:
+        item.updated_at = max(item.updated_at, incoming)
+    elif changed:
+        item.updated_at = utcnow()
 
 
 def _detach_item(session, item: Item) -> Item:
@@ -112,165 +148,126 @@ def _detach_item(session, item: Item) -> Item:
     return item
 
 
-def add_item(
-    source_uri: str,
-    title: str | None = None,
-    source_type: str | None = None,
-    context: str | None = None,
-    chunks: list[ChunkInput] | None = None,
-    tags: list[str] | None = None,
-    expires_at: datetime | None = None,
-    created_at: datetime | str | None = None,
-    updated_at: datetime | str | None = None,
-    machine: str | None = None,
-    embeddings: list[list[float]] | None = None,
-    content_hash: str | None = None,
-    locations: list[LocationInput] | None = None,
-) -> tuple[Item, IngestStatus]:
-    """Upsert an item; returns (item, status).
+def _touch_existing(session, item: Item, record: Record, tags: list[str], incoming: datetime | None) -> Item:
+    """Same URI, same content: reconcile metadata, tags and locations without re-chunking."""
+    changed = _apply_locations(session, item, record)
+    if incoming is None:
+        changed = _set_item_meta(item, record) or changed
+        changed = _reconcile_tags(session, item, tags, replace=True) or changed
+    else:
+        if incoming > item.updated_at:
+            _set_item_meta(item, record)
+        _reconcile_tags(session, item, tags, replace=False)
+    _advance_updated_at(item, incoming, changed)
+    return item
 
-    Pass precomputed embeddings (one per chunk) and/or content_hash to skip
-    recomputing them per item. Passing updated_at switches to import semantics:
-    last-writer-wins on metadata, tag union, and the timestamp is preserved
-    rather than bumped (so re-imports don't mark items dirty).
-    """
-    chunks = chunks or []
-    tags = list(dict.fromkeys(tags or []))
-    new_hash = content_hash or compute_content_hash(chunks)
-    created_at = parse_timestamp(created_at)
-    incoming = parse_timestamp(updated_at)
 
-    with get_session() as session:
-        existing = session.exec(select(Item).where(Item.source_uri == source_uri)).first()
+def _merge_into(session, item: Item, record: Record, tags: list[str], incoming: datetime | None) -> Item:
+    """Same content under a new URI: record the extra location, union tags, leave metadata alone."""
+    changed = _apply_locations(session, item, record)
+    changed = _reconcile_tags(session, item, tags, replace=False) or changed
+    _advance_updated_at(item, incoming, changed)
+    return item
 
-        if existing and existing.content_hash == new_hash:
-            changed = _apply_locations(session, existing.id, source_uri, machine, locations)
-            existing_tags = {t.tag for t in existing.tags}
-            if incoming is None:
-                changed = _set_item_meta(existing, title, source_type, context, expires_at) or changed
-                if existing_tags != set(tags):
-                    changed = True
-                    for tag in list(existing.tags):
-                        session.delete(tag)
-                    for tag_name in tags:
-                        session.add(Tag(item_id=existing.id, tag=tag_name))
-                if changed:
-                    existing.updated_at = datetime.utcnow()
-            else:
-                if incoming > existing.updated_at:
-                    _set_item_meta(existing, title, source_type, context, expires_at)
-                    existing.updated_at = incoming
-                _add_missing_tags(session, existing.id, existing_tags, tags)
 
-            session.commit()
-            session.refresh(existing)
-            return _detach_item(session, existing), "unchanged"
+def _create_item(
+    session,
+    record: Record,
+    tags: list[str],
+    content_hash: str,
+    incoming: datetime | None,
+    embeddings: list[list[float]] | None,
+) -> Item:
+    """Insert the item, its chunks, tags, locations and vectors as one transaction."""
+    created_at = to_naive_utc(record.created_at)
+    item = Item(
+        source_uri=record.source_uri,
+        title=record.title,
+        source_type=record.source_type,
+        context=record.context,
+        content_hash=content_hash,
+        created_at=created_at or utcnow(),
+        updated_at=incoming or created_at or utcnow(),
+    )
+    session.add(item)
+    session.flush()
 
-        if existing:
-            _delete_item_in_session(session, existing)
-            session.commit()
-
-        # Check if content_hash matches another item (merge case)
-        hash_match = session.exec(select(Item).where(Item.content_hash == new_hash)).first()
-        if hash_match:
-            changed = _apply_locations(session, hash_match.id, source_uri, machine, locations)
-            changed = _add_missing_tags(session, hash_match.id, {t.tag for t in hash_match.tags}, tags) or changed
-            if incoming is not None:
-                hash_match.updated_at = max(hash_match.updated_at, incoming)
-            elif changed:
-                hash_match.updated_at = datetime.utcnow()
-            session.commit()
-            session.refresh(hash_match)
-            return _detach_item(session, hash_match), "merged"
-
-        item = Item(
-            source_uri=source_uri,
-            title=title,
-            source_type=source_type,
-            context=context,
-            content_hash=new_hash,
-            expires_at=expires_at,
-            created_at=created_at or datetime.utcnow(),
-            updated_at=incoming or created_at or datetime.utcnow(),
+    chunks = [
+        Chunk(
+            item_id=item.id,
+            chunk_key=chunk.key,
+            chunk_index=idx,
+            text=chunk.text,
+            meta=json.dumps(chunk.meta) if chunk.meta else None,
         )
-        session.add(item)
-        session.flush()
+        for idx, chunk in enumerate(record.chunks)
+    ]
+    session.add_all(chunks)
+    session.flush()
 
-        chunk_records = []
-        texts_to_embed = []
+    for tag_name in tags:
+        session.add(Tag(item_id=item.id, tag=tag_name))
+    _apply_locations(session, item, record)
 
-        for idx, chunk_data in enumerate(chunks):
-            chunk_record = Chunk(
-                item_id=item.id,
-                chunk_key=chunk_data.key,
-                chunk_index=idx,
-                text=chunk_data.text,
-                meta=json.dumps(chunk_data.meta) if chunk_data.meta else None,
-            )
-            session.add(chunk_record)
-            chunk_records.append(chunk_record)
-            texts_to_embed.append(chunk_data.text)
+    if chunks:
+        if embeddings is None:
+            embeddings = get_embeddings_sync([c.text for c in chunks])
+        _insert_chunk_embeddings(session, zip((c.id for c in chunks), embeddings))
+    return item
 
-        session.flush()
 
-        for tag_name in tags:
-            session.add(Tag(item_id=item.id, tag=tag_name))
+def prepare_record(record: Record) -> str:
+    """Normalize a record for indexing and return its content hash.
 
-        _apply_locations(session, item.id, source_uri, machine, locations)
-
-        session.commit()
-
-        if texts_to_embed:
-            if embeddings is None:
-                embeddings = get_embeddings_sync(texts_to_embed)
-            conn = get_raw_connection()
-            _insert_chunk_embeddings(conn.cursor(), zip((c.id for c in chunk_records), embeddings))
-            conn.commit()
-            conn.close()
-
-        session.refresh(item)
-        return _detach_item(session, item), "added"
+    Prepends the title as its own chunk so it's searchable (FTS + vector), unless one
+    is already there (import round-trips). Runs before hashing, so retitling an item
+    counts as a content change.
+    """
+    if record.title and not any(c.key == TITLE_CHUNK_KEY for c in record.chunks):
+        record.chunks.insert(0, ChunkInput(text=record.title, key=TITLE_CHUNK_KEY))
+    return compute_content_hash(record.chunks)
 
 
 def ingest_record(
     record: Record,
     *,
     extra_tags: list[str] | None = None,
-    default_machine: str | None = None,
     embeddings: list[list[float]] | None = None,
     content_hash: str | None = None,
 ) -> tuple[Item, IngestStatus]:
-    """Ingest one Record (the contract extractors emit) via add_item.
+    """Upsert one Record — the single write path into the index. Returns (item, status).
+
+    Three outcomes, keyed on content hash: the URI is already indexed with this exact
+    content ("unchanged"), the content is already indexed under a different URI
+    ("merged" — the new URI becomes another location of the one item), or it is new
+    ("added"; a URI whose content changed is deleted and re-added).
+
+    `record.updated_at` selects the merge policy — see the module docstring. Pass `embeddings`
+    (one per chunk) and/or `content_hash` to reuse work the caller already did.
 
     Does NOT init the DB — the caller must call init_db() once before looping.
     """
-    tags = (record.tags + (extra_tags or [])) or None  # add_item dedups
-    # A record that declares its locations owns its provenance; don't stamp the local host over it.
-    machine = record.machine or (None if record.locations else default_machine or get_machine_id())
-    return add_item(
-        source_uri=record.source_uri,
-        title=record.title,
-        context=record.context,
-        source_type=record.source_type,
-        tags=tags,
-        chunks=record.chunks,
-        created_at=record.created_at,
-        updated_at=record.updated_at,
-        machine=machine,
-        embeddings=embeddings,
-        content_hash=content_hash,
-        locations=record.locations,
-    )
+    content_hash = content_hash or prepare_record(record)
+    tags = list(dict.fromkeys(record.tags + (extra_tags or [])))
+    incoming = to_naive_utc(record.updated_at)
 
+    with get_session() as session:
+        existing = session.exec(select(Item).where(Item.source_uri == record.source_uri)).first()
+        if existing and existing.content_hash == content_hash:
+            item, status = _touch_existing(session, existing, record, tags, incoming), "unchanged"
+        else:
+            if existing:
+                _delete_item_in_session(session, existing)
+                session.flush()
+            twin = session.exec(select(Item).where(Item.content_hash == content_hash)).first()
+            if twin:
+                item, status = _merge_into(session, twin, record, tags, incoming), "merged"
+            else:
+                item, status = _create_item(session, record, tags, content_hash, incoming, embeddings), "added"
 
-def _ensure_title_chunk(record: Record) -> None:
-    """Prepend the title as its own chunk so it's searchable (FTS + vector).
-
-    Skipped when a "title" chunk already exists (import round-trips). Runs
-    before hashing, so a title change is a content change.
-    """
-    if record.title and not any(c.key == "title" for c in record.chunks):
-        record.chunks.insert(0, ChunkInput(text=record.title, key="title"))
+        session.commit()
+        session.refresh(item)
+        return _detach_item(session, item), status
 
 
 def ingest_records(
@@ -333,8 +330,7 @@ def ingest_records(
 
     try:
         for record in records:
-            _ensure_title_chunk(record)
-            batch.append((record, compute_content_hash(record.chunks)))
+            batch.append((record, prepare_record(record)))
             if sum(len(rec.chunks) for rec, _ in batch) >= batch_chunks:
                 flush()
     finally:
@@ -343,7 +339,7 @@ def ingest_records(
 
 
 def _delete_item_in_session(session, item: Item) -> None:
-    _delete_chunk_embeddings([c.id for c in item.chunks])
+    _delete_chunk_embeddings(session, [c.id for c in item.chunks])
     session.delete(item)
 
 
@@ -362,8 +358,7 @@ def delete_items_by_prefix(prefix: str) -> int:
         raise ValueError("prefix must not be empty")
     with get_session() as session:
         items = session.exec(select(Item).where(Item.source_uri.startswith(prefix))).all()
-        all_chunk_ids = [c.id for item in items for c in item.chunks]
-        _delete_chunk_embeddings(all_chunk_ids)
+        _delete_chunk_embeddings(session, [c.id for item in items for c in item.chunks])
         for item in items:
             session.delete(item)
         session.commit()
@@ -401,36 +396,32 @@ def reindex_embeddings(batch_size: int = EMBED_BATCH_CHUNKS, on_progress=None) -
     Items, chunks, tags, and FTS are untouched. Returns the number of chunks re-embedded.
     """
     dim = get_dimension()
-    conn = get_raw_connection()
-    cursor = conn.cursor()
-    cursor.execute("DROP TABLE IF EXISTS chunk_embeddings")
-    cursor.execute("DROP TABLE IF EXISTS chunk_embeddings_bq")
-    create_embeddings_table(cursor)
-    conn.commit()
-
     with get_session() as session:
+        conn = session.connection()
+        conn.exec_driver_sql("DROP TABLE IF EXISTS chunk_embeddings")
+        conn.exec_driver_sql("DROP TABLE IF EXISTS chunk_embeddings_bq")
+        create_embeddings_tables(conn)
         session.merge(Setting(key="embed_dimension", value=str(dim)))
         session.merge(Setting(key="embed_model", value=get_model_id()))
         session.commit()
 
-    total = cursor.execute("SELECT COUNT(*) FROM chunk").fetchone()[0]
-    done = 0
-    last_id = 0
-    while True:
-        rows = cursor.execute(
-            "SELECT id, text FROM chunk WHERE id > ? ORDER BY id LIMIT ?", (last_id, batch_size)
-        ).fetchall()
-        if not rows:
-            break
-        embeddings = get_embeddings_sync([text for _, text in rows])
-        _insert_chunk_embeddings(cursor, zip((chunk_id for chunk_id, _ in rows), embeddings))
-        conn.commit()
-        last_id = rows[-1][0]
-        done += len(rows)
-        if on_progress:
-            on_progress(done, total)
-    conn.close()
-    return done
+        total = session.exec(select(func.count(Chunk.id))).one()
+        done = 0
+        last_id = 0
+        while True:
+            rows = session.exec(
+                select(Chunk.id, Chunk.text).where(Chunk.id > last_id).order_by(Chunk.id).limit(batch_size)
+            ).all()
+            if not rows:
+                break
+            embeddings = get_embeddings_sync([text for _, text in rows])
+            _insert_chunk_embeddings(session, zip((chunk_id for chunk_id, _ in rows), embeddings))
+            session.commit()
+            last_id = rows[-1][0]
+            done += len(rows)
+            if on_progress:
+                on_progress(done, total)
+        return done
 
 
 def get_stats() -> dict:

@@ -35,12 +35,12 @@ def iter_records(
     ollama_url = normalize_ollama_url(base_url or os.getenv("OLLAMA_BASE_URL", "http://localhost:11434"))
     vision_model = model or os.getenv("OLLAMA_VISION_MODEL", "llama3.2-vision")
 
-    for img_file in files:
-        try:
-            with open(img_file, "rb") as f:
-                image_data = base64.b64encode(f.read()).decode("utf-8")
+    with httpx.Client(timeout=120.0) as client:
+        for img_file in files:
+            try:
+                with open(img_file, "rb") as f:
+                    image_data = base64.b64encode(f.read()).decode("utf-8")
 
-            with httpx.Client(timeout=120.0) as client:
                 response = client.post(
                     f"{ollama_url}/api/generate",
                     json={
@@ -52,24 +52,26 @@ def iter_records(
                 )
                 response.raise_for_status()
                 description = response.json()["response"]
-        except httpx.ConnectError as e:
-            raise MissingExtractorDependency(f"Cannot connect to Ollama at {ollama_url}") from e
-        except Exception as e:
-            print(f"Error describing {img_file}: {e}", file=sys.stderr)
-            continue
+            except httpx.ConnectError as e:
+                raise MissingExtractorDependency(f"Cannot connect to Ollama at {ollama_url}") from e
+            except Exception as e:
+                print(f"Error describing {img_file}: {e}", file=sys.stderr)
+                continue
 
-        if not description or not description.strip():
-            continue
+            if not description or not description.strip():
+                continue
 
-        yield Record(
-            source_uri=file_uri(img_file),
-            chunks=[{"text": description.strip(), "key": "description", "meta": {"original_filename": img_file.name}}],
-            tags=["image"] + (tag or []),
-            title=img_file.stem,
-            source_type="image",
-            context=json.dumps({"path": str(img_file), "vision_model": vision_model}),
-            created_at=get_file_mtime(img_file),
-        )
+            yield Record(
+                source_uri=file_uri(img_file),
+                chunks=[
+                    {"text": description.strip(), "key": "description", "meta": {"original_filename": img_file.name}}
+                ],
+                tags=["image"] + (tag or []),
+                title=img_file.stem,
+                source_type="image",
+                context=json.dumps({"path": str(img_file), "vision_model": vision_model}),
+                created_at=get_file_mtime(img_file),
+            )
 
 
 def extract(

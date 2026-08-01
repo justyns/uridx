@@ -9,23 +9,22 @@ from rich.console import Console
 from rich.progress import BarColumn, MofNCompleteColumn, Progress, SpinnerColumn, TextColumn
 
 from uridx.cli.extract import app as extract_app
-from uridx.cli.extract.base import MissingExtractorDependency, filter_existing_files, output
+from uridx.cli.extract.base import MissingExtractorDependency, drop_indexed_files, output
 from uridx.cli.extract.registry import load_extractor, resolve_dispatch
-from uridx.config import get_machine_id
 from uridx.db.engine import init_db, require_embed_model_match
 from uridx.embeddings import EmbeddingBackendError
 from uridx.db.operations import (
-    add_item,
     delete_item,
     delete_items_by_prefix,
     get_item,
     get_stats,
+    ingest_record,
     ingest_records,
     list_items_by_prefix,
-    parse_timestamp,
     reindex_embeddings,
 )
-from uridx.record import ChunkInput, RecordError, iter_jsonl_records
+from uridx.record import ChunkInput, Record, RecordError, iter_jsonl_records
+from uridx.timeutil import to_naive_utc
 from uridx.search.hybrid import hybrid_search
 from uridx.sync import import_records, iter_export_records
 
@@ -141,12 +140,7 @@ def ingest(
     if text:
         content = sys.stdin.read()
         with Console(stderr=True).status(f"Ingesting {text}..."):
-            item, _ = add_item(
-                source_uri=text,
-                chunks=[ChunkInput(text=content)],
-                tags=tag,
-                machine=get_machine_id(),
-            )
+            item, _ = ingest_record(Record(source_uri=text, chunks=[ChunkInput(text=content)], tags=tag or []))
         print(json.dumps({"source_uri": item.source_uri, "chunks": len(item.chunks)}))
     else:
         _run_record_stream(
@@ -201,7 +195,7 @@ def add(
     plan: list[tuple[str, list]] = []
     skipped_existing = 0
     for name, files in buckets.items():
-        survivors = filter_existing_files(files, force)
+        survivors = drop_indexed_files(files, force)
         skipped_existing += len(files) - len(survivors)
         if survivors:
             plan.append((name, survivors))
@@ -253,7 +247,7 @@ def export(
     """
     init_db()
     try:
-        since_ts = parse_timestamp(since)
+        since_ts = to_naive_utc(since)
     except ValueError:
         print(f"Error: invalid --since timestamp: {since}", file=sys.stderr)
         raise typer.Exit(2)

@@ -4,9 +4,10 @@ from datetime import datetime, timezone
 from sqlmodel import select
 
 from uridx.config import URIDX_MIN_SCORE, URIDX_RESCORE_K
-from uridx.db.engine import get_raw_connection, get_session
+from uridx.db.engine import get_session
 from uridx.db.models import Chunk, Item, Tag
 from uridx.embeddings import get_embeddings_sync, serialize_embedding
+from uridx.record import TITLE_CHUNK_KEY
 from uridx.search.query import process_query
 
 
@@ -65,6 +66,23 @@ def _apply_item_filters(
     return stmt
 
 
+def _preview_chunk_id():
+    """Correlated subquery for the chunk that best previews an item.
+
+    Body before title (the title is already displayed on its own line, so previewing
+    it would just repeat it), then lowest chunk_index. Always resolves as long as the
+    item has any chunk at all.
+    """
+    return (
+        select(Chunk.id)
+        .where(Chunk.item_id == Item.id)
+        .order_by((Chunk.chunk_key == TITLE_CHUNK_KEY).asc(), Chunk.chunk_index)
+        .limit(1)
+        .correlate(Item)
+        .scalar_subquery()
+    )
+
+
 def _list_results(
     *,
     limit: int,
@@ -79,7 +97,7 @@ def _list_results(
     `--tag thread:<id>`) without a ranking query.
     """
     with get_session() as session:
-        stmt = select(Chunk, Item).join(Item, Chunk.item_id == Item.id).where(Chunk.chunk_index == 0)
+        stmt = select(Chunk, Item).join(Item, Chunk.item_id == Item.id).where(Chunk.id == _preview_chunk_id())
         stmt = _apply_item_filters(stmt, source_type, source_prefix, after, tags)
         stmt = stmt.order_by(Item.created_at.desc()).limit(limit)
         rows = session.exec(stmt).all()
@@ -99,38 +117,38 @@ def _list_results(
         ]
 
 
-def _vector_search(cursor, embedding_blob: bytes, limit: int) -> list[tuple[int, float]]:
+def _vector_search(conn, embedding_blob: bytes, limit: int) -> list[tuple[int, float]]:
     """Two-stage KNN: coarse hamming scan over sign-bit vectors, exact rescore of the survivors.
 
     The bit vectors are 32x smaller than the floats, so the full-table pass is cheap;
     only the URIDX_RESCORE_K coarse candidates pay full float distance math.
     """
-    query_bits = cursor.execute("SELECT vec_quantize_binary(?)", (embedding_blob,)).fetchone()[0]
-    cursor.execute(
-        "SELECT chunk_id FROM chunk_embeddings_bq "
-        "ORDER BY vec_distance_hamming(vec_bit(embedding), vec_bit(?)) LIMIT ?",
-        (query_bits, max(URIDX_RESCORE_K, limit)),
-    )
-    candidates = [row[0] for row in cursor.fetchall()]
+    query_bits = conn.exec_driver_sql("SELECT vec_quantize_binary(?)", (embedding_blob,)).scalar()
+    candidates = [
+        row[0]
+        for row in conn.exec_driver_sql(
+            "SELECT chunk_id FROM chunk_embeddings_bq "
+            "ORDER BY vec_distance_hamming(vec_bit(embedding), vec_bit(?)) LIMIT ?",
+            (query_bits, max(URIDX_RESCORE_K, limit)),
+        )
+    ]
     if not candidates:
         return []
     placeholders = ",".join("?" * len(candidates))
-    cursor.execute(
+    return conn.exec_driver_sql(
         f"SELECT chunk_id, vec_distance_l2(embedding, ?) AS distance FROM chunk_embeddings "
         f"WHERE chunk_id IN ({placeholders}) ORDER BY distance LIMIT ?",
         (embedding_blob, *candidates, limit),
-    )
-    return cursor.fetchall()
+    ).fetchall()
 
 
-def _fts_search(cursor, fts_query: str, limit: int) -> list[tuple[int, float]]:
+def _fts_search(conn, fts_query: str, limit: int) -> list[tuple[int, float]]:
     if not fts_query:
         return []
-    cursor.execute(
+    return conn.exec_driver_sql(
         "SELECT rowid, bm25(chunks_fts) as score FROM chunks_fts WHERE chunks_fts MATCH ? ORDER BY score LIMIT ?",
         (fts_query, limit * 3),
-    )
-    return cursor.fetchall()
+    ).fetchall()
 
 
 def hybrid_search(
@@ -150,31 +168,20 @@ def hybrid_search(
     if not query.strip():
         return _list_results(limit=limit, source_type=source_type, tags=tags, source_prefix=source_prefix, after=after)
 
-    conn = get_raw_connection()
-    cursor = conn.cursor()
-
     fts_query = process_query(query)
-
-    if semantic:
-        query_embedding = get_embeddings_sync([query])[0]
-        embedding_blob = serialize_embedding(query_embedding)
-
-        vec_results = _vector_search(cursor, embedding_blob, limit * 3)
-
-        fts_results = _fts_search(cursor, fts_query, limit)
-        ranked_chunks = _rrf([vec_results, fts_results])
-    else:
-        ranked_chunks = _fts_search(cursor, fts_query, limit)
-
-    conn.close()
-
-    if not ranked_chunks:
-        return []
-
-    chunk_ids = [c[0] for c in ranked_chunks]
-    score_map = {c[0]: c[1] for c in ranked_chunks}
+    query_blob = serialize_embedding(get_embeddings_sync([query])[0]) if semantic else None
 
     with get_session() as session:
+        conn = session.connection()
+        ranked_chunks = _fts_search(conn, fts_query, limit)
+        if semantic:
+            ranked_chunks = _rrf([_vector_search(conn, query_blob, limit * 3), ranked_chunks])
+        if not ranked_chunks:
+            return []
+
+        chunk_ids = [c[0] for c in ranked_chunks]
+        score_map = {c[0]: c[1] for c in ranked_chunks}
+
         stmt = select(Chunk, Item).join(Item, Chunk.item_id == Item.id).where(Chunk.id.in_(chunk_ids))
         stmt = _apply_item_filters(stmt, source_type, source_prefix, after, tags)
 

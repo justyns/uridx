@@ -1,10 +1,14 @@
 """Shared utilities for extractors."""
 
 import sys
+from collections.abc import Callable
 from datetime import datetime, timezone
 from pathlib import Path
+from typing import TypeVar
 
 from uridx.record import Record
+
+T = TypeVar("T")
 
 
 class MissingExtractorDependency(Exception):
@@ -27,20 +31,6 @@ def get_file_mtime(path: Path) -> str:
     return datetime.fromtimestamp(mtime, tz=timezone.utc).isoformat()
 
 
-def as_utc(value: datetime | str | None) -> datetime | None:
-    """Coerce an ISO8601 string or naive datetime to aware UTC (None if unset).
-
-    The aware-UTC twin of `db.operations.parse_timestamp`, which converts to the
-    naive UTC the DB stores. Naive input (e.g. a `--since` date from typer) is read
-    as UTC; a malformed string raises ValueError rather than filtering silently.
-    """
-    if value is None:
-        return None
-    if isinstance(value, str):
-        value = datetime.fromisoformat(value)
-    return value.replace(tzinfo=timezone.utc) if value.tzinfo is None else value.astimezone(timezone.utc)
-
-
 def output(record: Record) -> None:
     """Print a record as one JSONL line (omitting unset/None fields)."""
     print(record.model_dump_json(exclude_none=True), flush=True)
@@ -60,29 +50,33 @@ def resolve_paths(paths: list[Path], extensions: set[str]) -> list[Path]:
     return files
 
 
-def filter_existing(source_uri_map: dict, force: bool, label=lambda v: v) -> None:
-    """Drop already-ingested URIs from source_uri_map in place (no-op when force)."""
-    if force or not source_uri_map:
-        return
+def drop_indexed(candidates: dict[str, T], force: bool, label: Callable[[T], str] = str) -> dict[str, T]:
+    """Return the candidates whose source_uri isn't indexed yet, reporting each skip.
+
+    Keyed by source_uri, valued with whatever the extractor needs to do the work (a
+    path, a database row), so it can filter before paying for extraction. `label`
+    renders a value for the skip message. No-op when force.
+    """
+    if force or not candidates:
+        return candidates
     from uridx.db.engine import init_db
     from uridx.db.operations import get_existing_source_uris
 
     init_db()
-    for uri in get_existing_source_uris(list(source_uri_map.keys())):
-        print(f"Skipping {label(source_uri_map[uri])} (already ingested)", file=sys.stderr)
-        del source_uri_map[uri]
+    indexed = get_existing_source_uris(list(candidates))
+    for uri in indexed:
+        print(f"Skipping {label(candidates[uri])} (already ingested)", file=sys.stderr)
+    return {uri: value for uri, value in candidates.items() if uri not in indexed}
 
 
-def filter_existing_files(files: list[Path], force: bool) -> list[Path]:
-    """Drop already-ingested files from a resolved file list (no-op when force)."""
-    source_map = {file_uri(f): f for f in files}
-    filter_existing(source_map, force)
-    return list(source_map.values())
+def drop_indexed_files(files: list[Path], force: bool) -> list[Path]:
+    """Drop already-indexed files from a resolved file list (no-op when force)."""
+    return list(drop_indexed({file_uri(f): f for f in files}, force).values())
 
 
 def prepare_files(paths: list[Path], extensions: set[str], force: bool) -> list[Path]:
-    """Resolve paths to matching files, dropping already-ingested ones (unless force)."""
-    return filter_existing_files(resolve_paths(paths, extensions), force)
+    """Resolve paths to matching files, dropping already-indexed ones (unless force)."""
+    return drop_indexed_files(resolve_paths(paths, extensions), force)
 
 
 def split_text(text: str, max_chars: int) -> list[str]:

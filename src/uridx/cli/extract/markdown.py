@@ -13,7 +13,7 @@ from uridx.record import Record
 
 from .base import file_uri, get_file_mtime, output, prepare_files
 
-EXTENSIONS = {".md", ".markdown"}
+EXTENSIONS = {".md", ".mdc", ".markdown"}
 MIN_CHUNK_SIZE = 100
 
 

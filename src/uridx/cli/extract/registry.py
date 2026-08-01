@@ -5,49 +5,36 @@ for extractors that work on specific extensions.
 """
 
 import importlib
+from functools import lru_cache
 from pathlib import Path
 from typing import Optional
 
-# Extractor name -> module path
-MODULES = {
-    "markdown": "uridx.cli.extract.markdown",
-    "pdf": "uridx.cli.extract.pdf",
-    "image": "uridx.cli.extract.image",
-    "docling": "uridx.cli.extract.docling",
-}
-
-# Default extension -> extractor for auto-detect
-DEFAULT_BY_EXT = {
-    ".md": "markdown",
-    ".mdc": "markdown",
-    ".markdown": "markdown",
-    ".pdf": "pdf",
-    ".jpg": "image",
-    ".jpeg": "image",
-    ".png": "image",
-    ".gif": "image",
-    ".webp": "image",
-    ".bmp": "image",
-    ".docx": "docling",
-    ".xlsx": "docling",
-    ".pptx": "docling",
-    ".html": "docling",
-    ".htm": "docling",
-    ".xhtml": "docling",
-    ".tiff": "docling",
-    ".adoc": "docling",
-    ".csv": "docling",
-}
+# File-drop extractors, most specific first. Several claim overlapping extensions
+# (docling also reads .md and images); the earliest one here wins auto-detect.
+EXTRACTOR_PRIORITY = ("markdown", "pdf", "image", "docling")
 
 
 def load_extractor(name: str):
     """Import and return an extractor module by name."""
-    return importlib.import_module(MODULES[name])
+    if name not in EXTRACTOR_PRIORITY:
+        raise ValueError(f"Unknown extractor '{name}'. Choose from: {', '.join(sorted(EXTRACTOR_PRIORITY))}")
+    return importlib.import_module(f"uridx.cli.extract.{name}")
 
 
 def supported_extensions(name: str) -> set[str]:
     """Extensions a named extractor handles."""
     return load_extractor(name).EXTENSIONS
+
+
+@lru_cache(maxsize=1)
+def default_by_ext() -> dict[str, str]:
+    """Extension -> extractor for auto-detect, derived from what each extractor claims.
+
+    Built by walking EXTRACTOR_PRIORITY in reverse so earlier (more specific)
+    extractors overwrite later ones. Deriving it keeps `add foo.x` and
+    `add --extractor <name> foo.x` from disagreeing about who handles `.x`.
+    """
+    return {ext: name for name in reversed(EXTRACTOR_PRIORITY) for ext in supported_extensions(name)}
 
 
 def resolve_dispatch(paths: list[str], extractor: Optional[str] = None) -> tuple[dict[str, list[Path]], list[Path]]:
@@ -56,11 +43,10 @@ def resolve_dispatch(paths: list[str], extractor: Optional[str] = None) -> tuple
     Returns (buckets, skipped): buckets maps extractor_name -> [Path, ...] (dedup by resolved
     path); skipped lists files with no matching extractor. Directories are walked recursively.
     With `extractor` set, only files matching that extractor's extensions are taken.
+    Raises ValueError for an unknown extractor name.
     """
-    if extractor is not None and extractor not in MODULES:
-        raise ValueError(f"Unknown extractor '{extractor}'. Choose from: {', '.join(sorted(MODULES))}")
-
     exts = supported_extensions(extractor) if extractor else None
+    by_ext = default_by_ext()
     buckets: dict[str, list[Path]] = {}
     skipped: list[Path] = []
     seen: set[Path] = set()
@@ -71,7 +57,7 @@ def resolve_dispatch(paths: list[str], extractor: Optional[str] = None) -> tuple
             return
         seen.add(rp)
         ext = path.suffix.lower()
-        name = (extractor if ext in exts else None) if extractor else DEFAULT_BY_EXT.get(ext)
+        name = (extractor if ext in exts else None) if extractor else by_ext.get(ext)
         (buckets.setdefault(name, []) if name else skipped).append(path)
 
     for p in paths:
