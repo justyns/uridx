@@ -280,17 +280,6 @@ def iter_message_records(
             yield rec
 
 
-def parse_since(value: str | None) -> datetime | None:
-    """Parse a YYYY-MM-DD filter date to an aware UTC datetime (None if unset)."""
-    if not value:
-        return None
-    try:
-        dt = datetime.strptime(value, "%Y-%m-%d")
-    except ValueError as e:
-        raise ValueError(f"Invalid date format: {value} (expected YYYY-MM-DD)") from e
-    return dt.replace(tzinfo=timezone.utc)
-
-
 def parse_duration(value: str | None) -> int | None:
     """Parse a duration like 30m / 2h / 7d / 1w into seconds (None if unset)."""
     if not value:

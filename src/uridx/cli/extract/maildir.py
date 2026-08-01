@@ -4,12 +4,14 @@ import multiprocessing
 import sys
 import time
 from collections.abc import Iterator
+from datetime import datetime
 from pathlib import Path
 from typing import Annotated, Optional
 
 import typer
 
-from ._mail import JunkMode, message_record, parse_bytes, parse_duration, parse_since
+from ._mail import JunkMode, message_record, parse_bytes, parse_duration
+from .base import as_utc
 
 _worker_cfg = None
 
@@ -66,7 +68,8 @@ def extract(
     ] = None,
     junk: Annotated[JunkMode, typer.Option("--junk", help="Junk handling")] = JunkMode.skip,
     since: Annotated[
-        Optional[str], typer.Option("--since", "-s", help="Only mail dated on/after this date (YYYY-MM-DD)")
+        Optional[datetime],
+        typer.Option("--since", "-s", formats=["%Y-%m-%d"], help="Only mail dated on/after this date"),
     ] = None,
     newer_than: Annotated[
         Optional[str],
@@ -78,8 +81,8 @@ def extract(
     jobs: Annotated[int, typer.Option("--jobs", "-j", help="Parallel parse workers")] = 1,
 ):
     """Extract email messages from a local Maildir."""
+    since_dt = as_utc(since)
     try:
-        since_dt = parse_since(since)
         window = parse_duration(newer_than)
     except ValueError as e:
         print(str(e), file=sys.stderr)

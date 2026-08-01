@@ -27,6 +27,20 @@ def get_file_mtime(path: Path) -> str:
     return datetime.fromtimestamp(mtime, tz=timezone.utc).isoformat()
 
 
+def as_utc(value: datetime | str | None) -> datetime | None:
+    """Coerce an ISO8601 string or naive datetime to aware UTC (None if unset).
+
+    The aware-UTC twin of `db.operations.parse_timestamp`, which converts to the
+    naive UTC the DB stores. Naive input (e.g. a `--since` date from typer) is read
+    as UTC; a malformed string raises ValueError rather than filtering silently.
+    """
+    if value is None:
+        return None
+    if isinstance(value, str):
+        value = datetime.fromisoformat(value)
+    return value.replace(tzinfo=timezone.utc) if value.tzinfo is None else value.astimezone(timezone.utc)
+
+
 def output(record: Record) -> None:
     """Print a record as one JSONL line (omitting unset/None fields)."""
     print(record.model_dump_json(exclude_none=True), flush=True)
