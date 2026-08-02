@@ -24,6 +24,7 @@ def normalize_ollama_url(url: str) -> str:
     return url
 
 
+# Default floor on cosine relevance for semantic search (see hybrid_search); unset = keep everything.
 URIDX_MIN_SCORE: float | None = float(v) if (v := os.getenv("URIDX_MIN_SCORE")) else None
 
 # Candidates fetched by the coarse binary-vector pass before exact rescoring.

@@ -88,7 +88,10 @@ def search(
     ] = False,
     semantic: Annotated[bool, typer.Option("--semantic/--no-semantic")] = True,
     recency_boost: Annotated[float, typer.Option("--recency-boost")] = 0.3,
-    min_score: Annotated[Optional[float], typer.Option("--min-score")] = None,
+    min_score: Annotated[
+        Optional[float],
+        typer.Option("--min-score", help="Drop results below this cosine relevance (semantic search only)"),
+    ] = None,
     source_prefix: Annotated[Optional[str], typer.Option("--source-prefix")] = None,
     after: Annotated[Optional[datetime], typer.Option("--after")] = None,
 ):
@@ -117,7 +120,8 @@ def search(
         print(json.dumps([asdict(r) for r in results], indent=2, default=_json_default))
     else:
         for r in results:
-            print(f"[{r.score:.3f}] {r.source_uri}")
+            relevance = f" (rel {r.relevance:.2f})" if r.relevance is not None else ""
+            print(f"[{r.score:.3f}]{relevance} {r.source_uri}")
             if r.title:
                 print(f"  Title: {r.title}")
             if r.source_type:

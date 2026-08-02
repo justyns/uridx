@@ -18,8 +18,14 @@ class SearchResult:
     source_type: str | None
     chunk_text: str
     score: float
+    """Rank within this result set, in (0, 1]. Relative: the best hit always scores 1.0,
+    however good or bad it is. Use it to order results, never to judge them."""
     tags: list[str] = field(default_factory=list)
     created_at: datetime | None = None
+    relevance: float | None = None
+    """Cosine similarity to the query, in [-1, 1]. Absolute and comparable across
+    searches, which is what --min-score thresholds. None for keyword-only search,
+    which never embeds the query."""
 
 
 def _rrf(result_lists: list[list[tuple[int, float]]], k: int = 60) -> list[tuple[int, float]]:
@@ -139,10 +145,27 @@ def _vector_search(conn, embedding_blob: bytes, limit: int) -> list[tuple[int, f
         return []
     placeholders = ",".join("?" * len(candidates))
     return conn.exec_driver_sql(
-        f"SELECT chunk_id, vec_distance_l2(embedding, ?) AS distance FROM chunk_embeddings "
+        f"SELECT chunk_id, vec_distance_cosine(embedding, ?) AS distance FROM chunk_embeddings "
         f"WHERE chunk_id IN ({placeholders}) ORDER BY distance LIMIT ?",
         (embedding_blob, *candidates, limit),
     ).fetchall()
+
+
+def _relevance_by_chunk(conn, embedding_blob: bytes, chunk_ids: list[int]) -> dict[int, float]:
+    """Cosine similarity of each chunk to the query, in [-1, 1].
+
+    Computed for every ranked chunk, not just the ones the vector pass surfaced, so a
+    result that arrived via BM25 alone still gets an honest relevance number.
+    """
+    if not chunk_ids:
+        return {}
+    placeholders = ",".join("?" * len(chunk_ids))
+    rows = conn.exec_driver_sql(
+        f"SELECT chunk_id, 1.0 - vec_distance_cosine(embedding, ?) FROM chunk_embeddings "
+        f"WHERE chunk_id IN ({placeholders})",
+        (embedding_blob, *chunk_ids),
+    )
+    return {chunk_id: relevance for chunk_id, relevance in rows}
 
 
 MAX_AGE_DAYS = 365.0
@@ -184,6 +207,14 @@ def hybrid_search(
     source_prefix: str | None = None,
     after: datetime | None = None,
 ) -> list[SearchResult]:
+    """Rank chunks against the query, fusing BM25 and vector search.
+
+    Ordering comes from Reciprocal Rank Fusion, optionally nudged by recency.
+    `min_score` is a floor on cosine *relevance*, not on the fused rank score — the
+    top-ranked hit is always 1.0 even for a query matching nothing, so thresholding
+    the rank could never drop a bad result. It therefore only applies to semantic
+    search; keyword-only search never embeds the query and has no relevance to test.
+    """
     if min_score is None:
         min_score = URIDX_MIN_SCORE
 
@@ -210,6 +241,7 @@ def hybrid_search(
 
         results_data = session.exec(stmt).all()
         tags_by_item = _load_tags(session, {item.id for _, item in results_data})
+        relevance = _relevance_by_chunk(conn, query_blob, chunk_ids) if semantic else {}
 
         results = [
             SearchResult(
@@ -220,6 +252,7 @@ def hybrid_search(
                 score=score_map.get(chunk.id, 0.0),
                 tags=tags_by_item.get(item.id, []),
                 created_at=item.created_at,
+                relevance=relevance.get(chunk.id),
             )
             for chunk, item in results_data
         ]
@@ -230,6 +263,6 @@ def hybrid_search(
                 r.score = r.score * (1 - recency_boost) + _recency_score(r.created_at, now) * recency_boost
 
         results.sort(key=lambda x: x.score, reverse=True)
-        if min_score is not None:
-            results = [r for r in results if r.score >= min_score]
+        if min_score is not None and semantic:
+            results = [r for r in results if r.relevance is not None and r.relevance >= min_score]
         return results[:limit]
