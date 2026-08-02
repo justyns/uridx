@@ -24,6 +24,7 @@ class ParsedConversation:
     chunks: list[ChunkInput]
     title: str
     metadata: dict
+    started_at: str | None
     last_active: datetime | None
 
 
@@ -111,7 +112,11 @@ def _parse_conversation(jsonl_path: Path) -> ParsedConversation | None:
     metadata["ended_at"] = last_timestamp
 
     return ParsedConversation(
-        chunks=chunks, title=title, metadata=metadata, last_active=to_aware_utc(last_timestamp or first_timestamp)
+        chunks=chunks,
+        title=title,
+        metadata=metadata,
+        started_at=first_timestamp,
+        last_active=to_aware_utc(last_timestamp or first_timestamp),
     )
 
 
@@ -181,5 +186,8 @@ def extract(
                 title=result.title,
                 source_type="claude-code",
                 context=json.dumps(result.metadata),
+                # When the conversation happened, not when it was indexed: this drives
+                # the recency boost and `search --after`, as it does for tsugite.
+                created_at=result.started_at,
             )
         )

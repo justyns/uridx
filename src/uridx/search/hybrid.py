@@ -145,6 +145,23 @@ def _vector_search(conn, embedding_blob: bytes, limit: int) -> list[tuple[int, f
     ).fetchall()
 
 
+MAX_AGE_DAYS = 365.0
+
+
+def _recency_score(created_at: datetime | None, now: datetime) -> float:
+    """Freshness in [0, 1]: 1 for today, falling linearly to 0 at MAX_AGE_DAYS and older.
+
+    Clamped at both ends. Without the upper clamp a source dated in the future — a
+    restored archive, a skewed clock, a touched mtime — scores above 1 without bound
+    and swamps the relevance term it is supposed to be nudging.
+    """
+    if created_at is None:
+        return 0.0
+    created = created_at.replace(tzinfo=timezone.utc) if created_at.tzinfo is None else created_at
+    age_days = (now - created).total_seconds() / 86400
+    return min(1.0, max(0.0, 1.0 - age_days / MAX_AGE_DAYS))
+
+
 def _fts_search(conn, fts_query: str, limit: int) -> list[tuple[int, float]]:
     """Best-first BM25 matches. Note bm25() is negative and *descends* with relevance,
     so the rows are ordered ascending and the raw scores must be re-ranked before use."""
@@ -209,15 +226,8 @@ def hybrid_search(
 
         if recency_boost > 0 and results:
             now = datetime.now(timezone.utc)
-            max_age_days = 365.0
             for r in results:
-                if r.created_at:
-                    created = r.created_at.replace(tzinfo=timezone.utc) if r.created_at.tzinfo is None else r.created_at
-                    age_days = (now - created).total_seconds() / 86400
-                    age_score = max(0.0, 1.0 - (age_days / max_age_days))
-                else:
-                    age_score = 0.0
-                r.score = r.score * (1 - recency_boost) + age_score * recency_boost
+                r.score = r.score * (1 - recency_boost) + _recency_score(r.created_at, now) * recency_boost
 
         results.sort(key=lambda x: x.score, reverse=True)
         if min_score is not None:
