@@ -25,8 +25,11 @@ class SearchResult:
 def _rrf(result_lists: list[list[tuple[int, float]]], k: int = 60) -> list[tuple[int, float]]:
     """Combine ranked result lists using Reciprocal Rank Fusion.
 
-    Each input list is [(doc_id, score)] ordered by the source ranker.
-    Returns [(doc_id, normalized_score)] sorted by fused score descending.
+    Each input list is [(doc_id, score)] ordered by the source ranker; only the
+    ordering is used, never the raw score. Returns [(doc_id, normalized_score)] in
+    (0, 1] sorted descending. Also used with a single list, to put one ranker's
+    output on that same scale — the rest of the pipeline (recency mixing, min_score,
+    the final sort) assumes higher is better and O(1) magnitudes.
     """
     fused: dict[int, float] = {}
     for results in result_lists:
@@ -143,6 +146,8 @@ def _vector_search(conn, embedding_blob: bytes, limit: int) -> list[tuple[int, f
 
 
 def _fts_search(conn, fts_query: str, limit: int) -> list[tuple[int, float]]:
+    """Best-first BM25 matches. Note bm25() is negative and *descends* with relevance,
+    so the rows are ordered ascending and the raw scores must be re-ranked before use."""
     if not fts_query:
         return []
     return conn.exec_driver_sql(
@@ -173,9 +178,10 @@ def hybrid_search(
 
     with get_session() as session:
         conn = session.connection()
-        ranked_chunks = _fts_search(conn, fts_query, limit)
+        rankings = [_fts_search(conn, fts_query, limit)]
         if semantic:
-            ranked_chunks = _rrf([_vector_search(conn, query_blob, limit * 3), ranked_chunks])
+            rankings.append(_vector_search(conn, query_blob, limit * 3))
+        ranked_chunks = _rrf(rankings)
         if not ranked_chunks:
             return []
 

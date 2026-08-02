@@ -3,8 +3,9 @@
 SQLModel's `create_all` owns the plain tables (item, chunk, tag, location, setting).
 This module owns everything hand-rolled — the FTS5 virtual table and its triggers,
 and the vector tables — plus the in-place migrations that bring an older database up
-to the current shape. Every function takes a SQLAlchemy Connection and runs inside
-that connection's transaction.
+to the current shape. Every function takes a SQLAlchemy Connection and runs in that
+connection's transaction, except _migrate_vec0_table, which commits as it goes to
+keep the WAL bounded while copying a large vector table.
 """
 
 from sqlalchemy import Connection
