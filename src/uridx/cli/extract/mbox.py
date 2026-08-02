@@ -11,7 +11,9 @@ from typing import Annotated, Optional
 import typer
 
 from ._mail import JunkMode, iter_message_records, parse_bytes
-from .base import as_utc, output
+from uridx.timeutil import to_aware_utc
+
+from .base import output
 
 
 def _iter_messages(path: Path) -> Iterator[tuple[EmailMessage, str]]:
@@ -42,7 +44,7 @@ def extract(
     tag: Annotated[Optional[list[str]], typer.Option("--tag", "-t", help="Additional tags")] = None,
 ):
     """Extract email messages from one or more mbox files."""
-    since_dt = as_utc(since)
+    since_dt = to_aware_utc(since)
 
     for path in paths:
         if not path.is_file():

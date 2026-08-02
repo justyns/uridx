@@ -11,7 +11,7 @@ import typer
 
 from uridx.record import Record
 
-from .base import MissingExtractorDependency, file_uri, filter_existing, get_file_mtime, output, resolve_paths
+from .base import MissingExtractorDependency, drop_indexed, file_uri, get_file_mtime, output, resolve_paths
 
 EXTENSIONS = {
     ".pdf",
@@ -75,7 +75,7 @@ def extract(
     uri_map: dict[str, Union[str, Path]] = {url: url for url in urls}
     for file_path in resolve_paths(local_paths, EXTENSIONS):
         uri_map[file_uri(file_path)] = file_path
-    filter_existing(uri_map, force, label=str)
+    uri_map = drop_indexed(uri_map, force)
 
     survivors = list(uri_map.values())
     if not survivors:

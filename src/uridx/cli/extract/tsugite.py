@@ -10,15 +10,17 @@ import json
 import os
 import sqlite3
 import sys
+from collections.abc import Iterator
 from datetime import datetime
 from pathlib import Path
 from typing import Annotated, Optional
 
 import typer
 
-from uridx.record import ChunkInput, Record
+from uridx.record import Record
 
-from .base import filter_existing, output
+from ._turns import Role, build_turn_chunks
+from .base import drop_indexed, output
 
 DEFAULT_DB = Path.home() / ".local" / "share" / "tsugite" / "history" / "history.db"
 
@@ -39,27 +41,11 @@ def _connect_ro(db_path: Path) -> sqlite3.Connection:
     return conn
 
 
-def _build_turns(conn: sqlite3.Connection, session_id: str) -> list[ChunkInput]:
-    """Reconstruct User/Assistant turn chunks from a session's events, ordered by event id."""
-    turns: list[ChunkInput] = []
-    current_user: Optional[str] = None
-    current_assistant: list[str] = []
+def _iter_turns(conn: sqlite3.Connection, session_id: str) -> Iterator[tuple[Role, str]]:
+    """Reduce a session's event stream to the (role, text) pairs build_turn_chunks consumes.
 
-    def _emit() -> None:
-        parts = []
-        if current_user:
-            parts.append(f"User: {current_user}")
-        if current_assistant:
-            parts.append(f"Assistant: {' '.join(current_assistant)}")
-        if parts:
-            turns.append(
-                ChunkInput(
-                    text="\n\n".join(parts),
-                    key=f"turn-{len(turns)}",
-                    meta={"turn_index": len(turns)},
-                )
-            )
-
+    Ordered by event id, which is how tsugite itself renders a conversation.
+    """
     rows = conn.execute(
         "SELECT type, data FROM events WHERE session_id=? AND type IN ('user_input', 'model_response') ORDER BY id",
         (session_id,),
@@ -67,21 +53,9 @@ def _build_turns(conn: sqlite3.Connection, session_id: str) -> list[ChunkInput]:
     for row in rows:
         data = json.loads(row["data"])
         if row["type"] == "user_input":
-            text = (data.get("text") or "").strip()
-            if not text:
-                continue
-            if current_user or current_assistant:
-                _emit()
-            current_user = text
-            current_assistant = []
+            yield "user", (data.get("text") or "").strip()
         else:  # model_response
-            text = (data.get("raw_content") or "").strip()
-            if text:
-                current_assistant.append(text)
-
-    if current_user or current_assistant:
-        _emit()
-    return turns
+            yield "assistant", (data.get("raw_content") or "").strip()
 
 
 def extract(
@@ -121,12 +95,12 @@ def extract(
     source_uri_map: dict[str, sqlite3.Row] = {}
     for s in sessions:
         source_uri_map[f"tsugite://{s['agent'] or 'unknown'}/{s['session_id']}"] = s
-    filter_existing(source_uri_map, force, label=lambda s: s["session_id"])
+    source_uri_map = drop_indexed(source_uri_map, force, label=lambda s: s["session_id"])
     if not source_uri_map:
         return
 
     for source_uri, s in source_uri_map.items():
-        chunks = _build_turns(conn, s["session_id"])
+        chunks = build_turn_chunks(_iter_turns(conn, s["session_id"]))
         if not chunks:
             continue
 

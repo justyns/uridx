@@ -80,8 +80,8 @@ uridx search "project ideas" --tag idea
 uridx search "python tips" --type note --limit 5
 uridx search "exact phrase" --json
 
-# Filter by minimum score to drop low-quality results
-uridx search "test" --min-score 0.4
+# Drop results below a cosine relevance floor (semantic search only)
+uridx search "test" --min-score 0.6
 
 # Filter by source URI prefix
 uridx search "test" --source-prefix "memory://"
@@ -93,8 +93,21 @@ uridx search "test" --after 2026-03-01
 uridx search "test" --no-semantic
 
 # Combine filters
-uridx search "test" --min-score 0.4 --source-prefix "notes/" --after 2026-03-01
+uridx search "test" --min-score 0.6 --source-prefix "notes/" --after 2026-03-01
 ```
+
+Results print as `[score] (rel N) source_uri`. The two numbers mean different things:
+
+- **score** is the result's rank within this search, in (0, 1]. It is relative, so the
+  best hit always scores 1.000 even if nothing in the index matches. Use it for order.
+- **rel** is cosine similarity to the query, in [-1, 1]. It is absolute and comparable
+  across searches, and it is what `--min-score` thresholds.
+
+Pick a `--min-score` by running a query you know should match nothing and looking at the
+`rel` values it returns; anything at or below that is noise. The useful floor depends on
+the embedding model — unrelated text sits around 0.4-0.5 for `qwen3-embedding:0.6b`, so
+0.6 is a reasonable starting point there. Keyword-only search (`--no-semantic`) never
+embeds the query, so it reports no `rel` and ignores `--min-score`.
 
 ### Delete
 
@@ -151,7 +164,7 @@ Environment variables:
 | `OLLAMA_EMBED_MODEL`   | `qwen3-embedding:0.6b`           | Ollama embedding model                                  |
 | `URIDX_MACHINE`        | (hostname)                       | Machine label recorded in item locations (sync)         |
 | `URIDX_RESCORE_K`      | `500`                            | Coarse vector candidates rescored per semantic search   |
-| `URIDX_MIN_SCORE`      | (none)                           | Global minimum score threshold for search results       |
+| `URIDX_MIN_SCORE`      | (none)                           | Default `--min-score` (cosine relevance floor)          |
 
 Example with remote Ollama:
 ```bash

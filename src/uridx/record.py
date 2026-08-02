@@ -5,6 +5,10 @@ from collections.abc import Iterable, Iterator
 from pydantic import BaseModel, Field, ValidationError
 
 
+TITLE_CHUNK_KEY = "title"
+"""Reserved chunk key: the item title, indexed as its own chunk so it is searchable."""
+
+
 class RecordError(Exception):
     """Invalid record line in a JSONL stream."""
 

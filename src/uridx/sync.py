@@ -14,7 +14,7 @@ from datetime import datetime
 from sqlalchemy.orm import selectinload
 from sqlmodel import select
 
-from uridx.db.engine import get_raw_connection, get_session, get_setting
+from uridx.db.engine import get_session, get_setting
 from uridx.db.models import Item
 from uridx.db.operations import IngestStatus, ingest_records, read_chunk_embeddings
 from uridx.embeddings import deserialize_embedding
@@ -42,7 +42,6 @@ def iter_export_records(
     Items are paged by id so streaming a large index stays flat in memory.
     """
     embed_model, embed_dim = _embed_settings() if with_embeddings else (None, None)
-    conn = get_raw_connection() if with_embeddings else None
     filters = []
     if since is not None:
         filters.append(Item.updated_at >= since)
@@ -51,51 +50,52 @@ def iter_export_records(
     if source_type:
         filters.append(Item.source_type == source_type)
 
-    try:
-        last_id = 0
-        while True:
-            with get_session() as session:
-                items = session.exec(
-                    select(Item)
-                    .where(Item.id > last_id, *filters)
-                    .order_by(Item.id)
-                    .limit(EXPORT_PAGE_ITEMS)
-                    .options(selectinload(Item.chunks), selectinload(Item.tags), selectinload(Item.locations))
-                ).all()
+    last_id = 0
+    while True:
+        with get_session() as session:
+            items = session.exec(
+                select(Item)
+                .where(Item.id > last_id, *filters)
+                .order_by(Item.id)
+                .limit(EXPORT_PAGE_ITEMS)
+                .options(selectinload(Item.chunks), selectinload(Item.tags), selectinload(Item.locations))
+            ).all()
             if not items:
                 return
             last_id = items[-1].id
-            blobs = read_chunk_embeddings(conn, [c.id for item in items for c in item.chunks]) if conn else {}
+            blobs = (
+                read_chunk_embeddings(session, [c.id for item in items for c in item.chunks]) if with_embeddings else {}
+            )
+            page = [_export_record(item, blobs, embed_model, embed_dim) for item in items]
+        yield from page
 
-            for item in items:
-                chunks = sorted(item.chunks, key=lambda c: c.chunk_index or 0)
-                chunk_inputs = [
-                    ChunkInput(
-                        text=c.text,
-                        key=c.chunk_key,
-                        meta=json.loads(c.meta) if c.meta else None,
-                        embedding=base64.b64encode(blobs[c.id]).decode() if c.id in blobs else None,
-                    )
-                    for c in chunks
-                ]
-                has_embeddings = any(c.embedding for c in chunk_inputs)
-                yield Record(
-                    source_uri=item.source_uri,
-                    title=item.title,
-                    source_type=item.source_type,
-                    context=item.context,
-                    tags=[t.tag for t in item.tags],
-                    created_at=item.created_at.isoformat(),
-                    updated_at=item.updated_at.isoformat(),
-                    content_hash=item.content_hash,
-                    locations=[LocationInput(uri=loc.uri, machine=loc.machine) for loc in item.locations] or None,
-                    chunks=chunk_inputs,
-                    embed_model=embed_model if has_embeddings else None,
-                    embed_dim=embed_dim if has_embeddings else None,
-                )
-    finally:
-        if conn:
-            conn.close()
+
+def _export_record(item: Item, blobs: dict[int, bytes], embed_model: str | None, embed_dim: int | None) -> Record:
+    """One item as an export line: its chunks in order, plus provenance."""
+    chunks = [
+        ChunkInput(
+            text=c.text,
+            key=c.chunk_key,
+            meta=json.loads(c.meta) if c.meta else None,
+            embedding=base64.b64encode(blobs[c.id]).decode() if c.id in blobs else None,
+        )
+        for c in sorted(item.chunks, key=lambda c: c.chunk_index or 0)
+    ]
+    has_embeddings = any(c.embedding for c in chunks)
+    return Record(
+        source_uri=item.source_uri,
+        title=item.title,
+        source_type=item.source_type,
+        context=item.context,
+        tags=[t.tag for t in item.tags],
+        created_at=item.created_at.isoformat(),
+        updated_at=item.updated_at.isoformat(),
+        content_hash=item.content_hash,
+        locations=[LocationInput(uri=loc.uri, machine=loc.machine) for loc in item.locations] or None,
+        chunks=chunks,
+        embed_model=embed_model if has_embeddings else None,
+        embed_dim=embed_dim if has_embeddings else None,
+    )
 
 
 def _decode_embeddings(record: Record, model_id: str | None, dim: int | None) -> list[list[float]] | None:

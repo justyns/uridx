@@ -2,6 +2,7 @@
 
 import json
 import sys
+from collections.abc import Iterator
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
@@ -10,8 +11,10 @@ from typing import Annotated, Optional
 import typer
 
 from uridx.record import ChunkInput, Record
+from uridx.timeutil import to_aware_utc
 
-from .base import as_utc, filter_existing, output
+from ._turns import Role, build_turn_chunks
+from .base import drop_indexed, output
 
 
 @dataclass
@@ -21,6 +24,7 @@ class ParsedConversation:
     chunks: list[ChunkInput]
     title: str
     metadata: dict
+    started_at: str | None
     last_active: datetime | None
 
 
@@ -48,47 +52,19 @@ def _is_tool_result(msg: dict) -> bool:
     return False
 
 
-def _build_turns(messages: list[dict]) -> list[ChunkInput]:
-    turns: list[ChunkInput] = []
-    current_user = None
-    current_assistant = []
+def _iter_turns(messages: list[dict]) -> Iterator[tuple[Role, str]]:
+    """Reduce transcript lines to the (role, text) stream build_turn_chunks consumes.
 
-    def _emit():
-        text_parts = []
-        if current_user:
-            text_parts.append(f"User: {current_user}")
-        if current_assistant:
-            text_parts.append(f"Assistant: {' '.join(current_assistant)}")
-        if text_parts:
-            turns.append(
-                ChunkInput(
-                    text="\n\n".join(text_parts),
-                    key=f"turn-{len(turns)}",
-                    meta={"turn_index": len(turns)},
-                )
-            )
-
+    Tool results arrive as user messages but are tool output, not something the user
+    said, so they're dropped rather than starting a new turn.
+    """
     for msg in messages:
-        msg_type = msg.get("type")
-        if msg_type not in ("user", "assistant"):
+        role = msg.get("type")
+        if role not in ("user", "assistant"):
             continue
-
-        content = _extract_content(msg.get("message", {}))
-        if not content:
+        if role == "user" and _is_tool_result(msg):
             continue
-
-        if msg_type == "user" and not _is_tool_result(msg):
-            if current_user or current_assistant:
-                _emit()
-            current_user = content
-            current_assistant = []
-        elif msg_type == "assistant":
-            current_assistant.append(content)
-
-    if current_user or current_assistant:
-        _emit()
-
-    return turns
+        yield role, _extract_content(msg.get("message", {}))
 
 
 def _parse_conversation(jsonl_path: Path) -> ParsedConversation | None:
@@ -127,7 +103,7 @@ def _parse_conversation(jsonl_path: Path) -> ParsedConversation | None:
     if not messages:
         return None
 
-    chunks = _build_turns(messages)
+    chunks = build_turn_chunks(_iter_turns(messages))
     if not chunks:
         return None
 
@@ -136,7 +112,11 @@ def _parse_conversation(jsonl_path: Path) -> ParsedConversation | None:
     metadata["ended_at"] = last_timestamp
 
     return ParsedConversation(
-        chunks=chunks, title=title, metadata=metadata, last_active=as_utc(last_timestamp or first_timestamp)
+        chunks=chunks,
+        title=title,
+        metadata=metadata,
+        started_at=first_timestamp,
+        last_active=to_aware_utc(last_timestamp or first_timestamp),
     )
 
 
@@ -161,7 +141,7 @@ def extract(
         print(f"Projects directory not found: {projects_dir}", file=sys.stderr)
         raise typer.Exit(1)
 
-    since_dt = as_utc(since)
+    since_dt = to_aware_utc(since)
     cutoff_mtime = since_dt.timestamp() if since_dt else None
 
     # Build list of source_uris that will be generated
@@ -180,7 +160,7 @@ def extract(
             uri = f"claude-code://{project_hash}/{jsonl_file.stem}"
             source_uri_map[uri] = (jsonl_file, project_hash)
 
-    filter_existing(source_uri_map, force, label=lambda v: v[0])
+    source_uri_map = drop_indexed(source_uri_map, force, label=lambda v: str(v[0]))
     if not source_uri_map:
         return
 
@@ -206,5 +186,8 @@ def extract(
                 title=result.title,
                 source_type="claude-code",
                 context=json.dumps(result.metadata),
+                # When the conversation happened, not when it was indexed: this drives
+                # the recency boost and `search --after`, as it does for tsugite.
+                created_at=result.started_at,
             )
         )
