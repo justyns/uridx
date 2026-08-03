@@ -26,6 +26,30 @@ pdf = ["pdfplumber>=0.10"]
 [tool.ruff]
 line-length = 120
 
+[tool.ruff.lint]
+extend-select = ["TID253"]
+
+[tool.ruff.lint.flake8-tidy-imports]
+# Every uridx invocation imports cli/, so a module-level import there is paid by `--help`,
+# by argument errors, and by every command whether it needs the module or not. These are the
+# expensive ones; commands that need them import them in the function body instead.
+banned-module-level-imports = [
+    "httpx",
+    "numpy",
+    "pydantic",
+    "rich",
+    "sqlalchemy",
+    "sqlmodel",
+    "uridx.db",
+    "uridx.embeddings",
+    "uridx.search",
+    "uridx.sync",
+]
+
+[tool.ruff.lint.per-file-ignores]
+# The ban is only about keeping cli/ cheap to import; everything else may import freely.
+"!**/uridx/cli/**" = ["TID253"]
+
 [build-system]
 requires = ["hatchling", "uv-dynamic-versioning"]
 build-backend = "hatchling.build"

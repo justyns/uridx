@@ -6,11 +6,20 @@ and the vector tables — plus the in-place migrations that bring an older datab
 to the current shape. Every function takes a SQLAlchemy Connection and runs in that
 connection's transaction, except _migrate_vec0_table, which commits as it goes to
 keep the WAL bounded while copying a large vector table.
+
+The migrations here are one-time, but every one of them costs a full table scan on a
+large index. `apply_schema` therefore runs them only when the stored schema_version is
+behind, so ordinary commands pay one indexed lookup instead of a pass over every table. The
+recurring work, re-deriving the bit vectors when a writer drifts them, is split out into
+`heal_bq_drift`, which only the write path calls.
 """
 
 from sqlalchemy import Connection
 
 VEC0_MIGRATION_PAGE = 5000
+
+SCHEMA_VERSION = 1
+"""Bump when a migration below needs to re-run on databases that already ran the others."""
 
 
 def _sql_for(conn: Connection, kind: str, name: str) -> str | None:
@@ -58,11 +67,10 @@ def _migrate_vec0_table(conn: Connection) -> None:
 
 
 def _ensure_vector_tables(conn: Connection) -> None:
-    """Migrate legacy vec0 tables to plain ones and re-derive the bit table on drift.
+    """Migrate legacy vec0 vector tables to plain ones, and ensure both exist.
 
-    Drift happens when an older writer fills only the float table (or deletes
-    from it); bit vectors are pure derived data, so a wholesale rebuild is
-    always safe and cheap (one pass of vec_quantize_binary).
+    One-time structural work only. Re-deriving the bit table when a writer drifts it
+    is recurring, so it lives in `heal_bq_drift` instead.
     """
     float_sql = _sql_for(conn, "table", "chunk_embeddings")
     if float_sql is None:
@@ -78,6 +86,18 @@ def _ensure_vector_tables(conn: Connection) -> None:
     if bq_sql is None:
         conn.exec_driver_sql("CREATE TABLE chunk_embeddings_bq (chunk_id INTEGER PRIMARY KEY, embedding BLOB)")
 
+
+def heal_bq_drift(conn: Connection) -> None:
+    """Re-derive chunk_embeddings_bq from the float table when the two have drifted.
+
+    Ordinary ingests and deletes keep the bit table in step row by row; drift only comes
+    from an older writer that filled the float table alone. Bit vectors are pure derived
+    data, so a wholesale rebuild is always safe and cheap (one pass of vec_quantize_binary).
+
+    Both counts are full table scans, so only the write path calls this. Readers never need
+    to repair derived data, and `search`/`stats` would otherwise scan both tables on every
+    invocation for a check that almost always finds nothing to do.
+    """
     n_float = conn.exec_driver_sql("SELECT count(*) FROM chunk_embeddings").scalar()
     n_bq = conn.exec_driver_sql("SELECT count(*) FROM chunk_embeddings_bq").scalar()
     if n_bq != n_float:
@@ -147,9 +167,37 @@ def _backfill_locations(conn: Connection) -> None:
     )
 
 
+def _stored_schema_version(conn: Connection) -> int:
+    """The version this database was last migrated to; 0 if absent or unreadable.
+
+    0 re-runs the migrations, which are idempotent, so a corrupted value costs one slow
+    startup rather than silently leaving the schema unmigrated.
+    """
+    row = conn.exec_driver_sql("SELECT value FROM setting WHERE key = 'schema_version'").fetchone()
+    if row is None:
+        return 0
+    try:
+        return int(row[0])
+    except (TypeError, ValueError):
+        return 0
+
+
 def apply_schema(conn: Connection) -> None:
-    """Bring the hand-rolled schema up to date. Idempotent; safe on every startup."""
+    """Bring the hand-rolled schema up to date. Idempotent; safe on every startup.
+
+    Every migration below is a full table scan, so they run only when the database is
+    behind SCHEMA_VERSION. On an up-to-date index this is one indexed lookup.
+    """
+    if _stored_schema_version(conn) >= SCHEMA_VERSION:
+        return
+
     _ensure_item_content_hash(conn)
     _backfill_locations(conn)
     _ensure_vector_tables(conn)
     _ensure_fts_table(conn)
+
+    conn.exec_driver_sql(
+        "INSERT INTO setting (key, value, updated_at) VALUES ('schema_version', ?, datetime('now')) "
+        "ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at",
+        (str(SCHEMA_VERSION),),
+    )
