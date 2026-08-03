@@ -1,32 +1,23 @@
+"""Typer entrypoint.
+
+Only typer and the standard library are imported at module scope: everything else
+(sqlmodel, rich, the db and search packages) is imported inside the command that needs
+it. They dominate startup, and `--help` and argument errors would otherwise pay for all
+of them before printing anything. Enforced by ruff TID253 (see pyproject.toml).
+"""
+
 import json
 import sys
-from dataclasses import asdict
 from datetime import datetime
-from typing import Annotated, Optional
+from typing import TYPE_CHECKING, Annotated, Optional
 
 import typer
-from rich.console import Console
-from rich.progress import BarColumn, MofNCompleteColumn, Progress, SpinnerColumn, TextColumn
 
 from uridx.cli.extract import app as extract_app
-from uridx.cli.extract.base import MissingExtractorDependency, drop_indexed_files, output
-from uridx.cli.extract.registry import load_extractor, resolve_dispatch
-from uridx.db.engine import init_db, require_embed_model_match
-from uridx.embeddings import EmbeddingBackendError
-from uridx.db.operations import (
-    delete_item,
-    delete_items_by_prefix,
-    get_item,
-    get_stats,
-    ingest_record,
-    ingest_records,
-    list_items_by_prefix,
-    reindex_embeddings,
-)
-from uridx.record import ChunkInput, Record, RecordError, iter_jsonl_records
-from uridx.timeutil import to_naive_utc
-from uridx.search.hybrid import hybrid_search
-from uridx.sync import import_records, iter_export_records
+
+if TYPE_CHECKING:
+    from rich.console import Console
+    from rich.progress import Progress
 
 app = typer.Typer(pretty_exceptions_enable=False)
 app.add_typer(extract_app, name="extract")
@@ -34,7 +25,15 @@ app.add_typer(extract_app, name="extract")
 SNIPPET_LIMIT = 400
 
 
-def _progress(console: Console) -> Progress:
+def _console() -> "Console":
+    from rich.console import Console
+
+    return Console(stderr=True)
+
+
+def _progress(console: "Console") -> "Progress":
+    from rich.progress import BarColumn, MofNCompleteColumn, Progress, SpinnerColumn, TextColumn
+
     return Progress(
         SpinnerColumn(),
         TextColumn("[progress.description]{task.description}"),
@@ -62,7 +61,9 @@ def _indent(text: str, prefix: str = "  ") -> str:
 
 def _run_record_stream(run, verb: str, out_key: str):
     """Feed stdin JSONL records through run(records, on_result) with progress; print summary counts."""
-    console = Console(stderr=True)
+    from uridx.record import RecordError, iter_jsonl_records
+
+    console = _console()
     try:
         with _progress(console) as progress:
             task = progress.add_task(f"{verb}...", total=None)
@@ -95,6 +96,11 @@ def search(
     source_prefix: Annotated[Optional[str], typer.Option("--source-prefix")] = None,
     after: Annotated[Optional[datetime], typer.Option("--after")] = None,
 ):
+    from dataclasses import asdict
+
+    from uridx.db.engine import init_db, require_embed_model_match
+    from uridx.search.hybrid import hybrid_search
+
     init_db()
     if semantic and query.strip():
         require_embed_model_match()
@@ -138,12 +144,17 @@ def ingest(
     text: Annotated[Optional[str], typer.Option("--text")] = None,
     tag: Annotated[Optional[list[str]], typer.Option("--tag", "-t", help="Tags for ingested items")] = None,
 ):
+    from uridx.db.engine import heal_index, init_db, require_embed_model_match
+    from uridx.db.operations import ingest_record, ingest_records
+    from uridx.record import ChunkInput, Record
+
     init_db()
+    heal_index()
     require_embed_model_match()
 
     if text:
         content = sys.stdin.read()
-        with Console(stderr=True).status(f"Ingesting {text}..."):
+        with _console().status(f"Ingesting {text}..."):
             item, _ = ingest_record(Record(source_uri=text, chunks=[ChunkInput(text=content)], tags=tag or []))
         print(json.dumps({"source_uri": item.source_uri, "chunks": len(item.chunks)}))
     else:
@@ -169,6 +180,11 @@ def add(
     Porcelain over `extract | ingest`. Already-indexed files are skipped unless --force.
     Structured sources (Claude Code / Tsugite) are not auto-detected; use `extract`.
     """
+    from uridx.cli.extract.base import MissingExtractorDependency, drop_indexed_files
+    from uridx.cli.extract.registry import load_extractor, resolve_dispatch
+    from uridx.db.engine import heal_index, init_db, require_embed_model_match
+    from uridx.db.operations import ingest_records
+
     urls = [p for p in paths if p.startswith(("http://", "https://"))]
     if urls:
         print(
@@ -192,8 +208,9 @@ def add(
         return
 
     init_db()
+    heal_index()
     require_embed_model_match()
-    console = Console(stderr=True)
+    console = _console()
 
     # Pre-filter each bucket so already-indexed files are dropped (and reported) before any heavy work.
     plan: list[tuple[str, list]] = []
@@ -249,6 +266,11 @@ def export(
     embeddings) — not the original source files. Pipe to `uridx import`:
     `uridx export | ssh uridx@hub uridx import`.
     """
+    from uridx.cli.extract.base import output
+    from uridx.db.engine import init_db
+    from uridx.sync import iter_export_records
+    from uridx.timeutil import to_naive_utc
+
     init_db()
     try:
         since_ts = to_naive_utc(since)
@@ -270,7 +292,11 @@ def import_():
     are preserved, and embeddings are reused when the model matches (otherwise
     recomputed locally from chunk text).
     """
+    from uridx.db.engine import heal_index, init_db, require_embed_model_match
+    from uridx.sync import import_records
+
     init_db()
+    heal_index()
     require_embed_model_match()
     _run_record_stream(import_records, "Importing", "imported")
 
@@ -284,6 +310,9 @@ def delete(
     dry_run: Annotated[bool, typer.Option("--dry-run", help="Show what would be deleted")] = False,
 ):
     """Delete items from the index by URI or prefix."""
+    from uridx.db.engine import init_db
+    from uridx.db.operations import delete_item, delete_items_by_prefix, get_item, list_items_by_prefix
+
     if not uri and not source_prefix:
         print("Error: must provide --uri or --source-prefix", file=sys.stderr)
         raise typer.Exit(1)
@@ -314,6 +343,9 @@ def delete(
 
 @app.command()
 def stats():
+    from uridx.db.engine import init_db
+    from uridx.db.operations import get_stats
+
     init_db()
     print(json.dumps(get_stats(), indent=2))
 
@@ -326,8 +358,11 @@ def reindex():
     already in the DB — no re-extraction needed. Use after changing URIDX_EMBEDDINGS,
     FASTEMBED_MODEL, or OLLAMA_EMBED_MODEL.
     """
+    from uridx.db.engine import init_db
+    from uridx.db.operations import reindex_embeddings
+
     init_db()
-    console = Console(stderr=True)
+    console = _console()
     with _progress(console) as progress:
         task = progress.add_task("Reindexing...", total=None)
         count = reindex_embeddings(
@@ -338,6 +373,8 @@ def reindex():
 
 def main():
     """Entry point: report embedding-backend failures as one-line errors instead of tracebacks."""
+    from uridx.embeddings import EmbeddingBackendError
+
     try:
         app()
     except EmbeddingBackendError as e:

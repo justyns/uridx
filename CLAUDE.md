@@ -38,4 +38,8 @@ uv run uridx --help                  # CLI help
 **Database Schema**:
 - Regular tables: `item`, `chunk`, `tag`, `setting` (via SQLModel)
 - Virtual tables: `chunks_fts` (fts5 with triggers)
-- Vector tables (plain, not vec0 — sqlite-vec is used only for its scalar functions): `chunk_embeddings` (float32 blobs — exact rescore + export) and `chunk_embeddings_bq` (derived sign-bit blobs — coarse hamming pass; auto-healed by `init_db` when it drifts)
+- Vector tables (plain, not vec0 — sqlite-vec is used only for its scalar functions): `chunk_embeddings` (float32 blobs — exact rescore + export) and `chunk_embeddings_bq` (derived sign-bit blobs — coarse hamming pass; re-derived by `heal_index()`, which write commands call after `init_db()`)
+
+**Startup cost**: every command pays process + import + schema time before it does any work.
+- `db/schema.py` migrations are full table scans, so `apply_schema` runs them only when the stored `schema_version` setting is behind `SCHEMA_VERSION`. Bump that constant when a migration must re-run on databases that already ran the others.
+- Everything under `cli/` is imported on every invocation, so it imports only typer and the stdlib at module scope; sqlmodel, rich, and the db/search packages are imported inside the command that needs them. Ruff rejects module-level imports of those under `cli/` (TID253, configured in `pyproject.toml`).

@@ -8,7 +8,6 @@ from collections.abc import Iterator
 from pathlib import Path
 from typing import Annotated, Optional
 
-import httpx
 import typer
 
 from uridx.config import normalize_ollama_url
@@ -32,6 +31,8 @@ def iter_records(
     caller (the `add` command) needs no extra args. Raises MissingExtractorDependency
     if Ollama is unreachable, so a whole image bucket is skipped rather than crashing.
     """
+    import httpx  # deferred: only this extractor needs it, and importing it is not cheap
+
     ollama_url = normalize_ollama_url(base_url or os.getenv("OLLAMA_BASE_URL", "http://localhost:11434"))
     vision_model = model or os.getenv("OLLAMA_VISION_MODEL", "llama3.2-vision")
 

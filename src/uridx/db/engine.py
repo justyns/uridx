@@ -6,26 +6,42 @@ pooled connection as it opens, so its scalar functions are available to plain
 sqlite3 handle, and raw vector SQL shares a transaction with the ORM writes around it.
 """
 
+import importlib.util
+import os
+from functools import lru_cache
 from pathlib import Path
 
-import sqlite_vec
 from sqlalchemy import event
 from sqlmodel import Session, SQLModel, create_engine
 
 from uridx.config import URIDX_DB_PATH
 from uridx.db.models import Setting
-from uridx.db.schema import apply_schema
+from uridx.db.schema import apply_schema, heal_bq_drift
 from uridx.embeddings import EmbeddingBackendError, get_dimension, get_model_id
 
 _engine = None
 _db_initialized = False
 
 
+@lru_cache(maxsize=1)
+def _vec_extension_path() -> str:
+    """Path to the bundled sqlite-vec loadable extension, without importing the package.
+
+    `import sqlite_vec` pulls in numpy.typing through a try-block for register_numpy,
+    which uridx never uses and which is a meaningful chunk of startup. Only the path
+    is needed, and resolving it does not require executing the package.
+    """
+    spec = importlib.util.find_spec("sqlite_vec")
+    if spec is None or not spec.origin:
+        raise ImportError("sqlite-vec is not installed")
+    return os.path.normpath(os.path.join(os.path.dirname(spec.origin), "vec0"))
+
+
 def _on_connect(dbapi_conn, connection_record):
     dbapi_conn.execute("PRAGMA journal_mode=WAL")
     dbapi_conn.execute("PRAGMA busy_timeout=5000")
     dbapi_conn.enable_load_extension(True)
-    sqlite_vec.load(dbapi_conn)
+    dbapi_conn.load_extension(_vec_extension_path())
     dbapi_conn.enable_load_extension(False)
 
 
@@ -82,3 +98,10 @@ def init_db():
         conn.commit()
 
     _db_initialized = True
+
+
+def heal_index():
+    """Re-derive the bit vectors if a writer drifted them. Write path only, after init_db()."""
+    with get_engine().connect() as conn:
+        heal_bq_drift(conn)
+        conn.commit()

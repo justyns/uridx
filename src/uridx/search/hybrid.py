@@ -131,6 +131,12 @@ def _vector_search(conn, embedding_blob: bytes, limit: int) -> list[tuple[int, f
 
     The bit vectors are 32x smaller than the floats, so the full-table pass is cheap;
     only the URIDX_RESCORE_K coarse candidates pay full float distance math.
+
+    The coarse pass is bound by per-row overhead, not distance math: most of its time goes on
+    walking rows and one scalar-function call each. Packing the codes into wide blobs scored
+    by a single vectorized pass is measurably faster for identical results; tried and backed
+    out because a second copy of the vectors needs its own invalidation protocol. Worth
+    revisiting if this gets hot.
     """
     query_bits = conn.exec_driver_sql("SELECT vec_quantize_binary(?)", (embedding_blob,)).scalar()
     candidates = [
