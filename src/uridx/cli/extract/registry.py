@@ -37,18 +37,22 @@ def default_by_ext() -> dict[str, str]:
     return {ext: name for name in reversed(EXTRACTOR_PRIORITY) for ext in supported_extensions(name)}
 
 
-def resolve_dispatch(paths: list[str], extractor: Optional[str] = None) -> tuple[dict[str, list[Path]], list[Path]]:
+def resolve_dispatch(
+    paths: list[str], extractor: Optional[str] = None
+) -> tuple[dict[str, list[Path]], list[Path], list[Path]]:
     """Bucket input paths by which extractor handles them.
 
-    Returns (buckets, skipped): buckets maps extractor_name -> [Path, ...] (dedup by resolved
-    path); skipped lists files with no matching extractor. Directories are walked recursively.
-    With `extractor` set, only files matching that extractor's extensions are taken.
+    Returns (buckets, skipped, missing): buckets maps extractor_name -> [Path, ...] (dedup
+    by resolved path); skipped lists existing files with no matching extractor; missing
+    lists paths that don't exist at all. Directories are walked recursively. With
+    `extractor` set, only files matching that extractor's extensions are taken.
     Raises ValueError for an unknown extractor name.
     """
     exts = supported_extensions(extractor) if extractor else None
     by_ext = default_by_ext()
     buckets: dict[str, list[Path]] = {}
     skipped: list[Path] = []
+    missing: list[Path] = []
     seen: set[Path] = set()
 
     def classify(path: Path) -> None:
@@ -66,7 +70,9 @@ def resolve_dispatch(paths: list[str], extractor: Optional[str] = None) -> tuple
             for f in sorted(path.rglob("*")):
                 if f.is_file():
                     classify(f)
+        elif path.exists():
+            classify(path)
         else:
-            classify(path)  # a file, or a nonexistent path (no matching ext -> skipped)
+            missing.append(path)
 
-    return buckets, skipped
+    return buckets, skipped, missing

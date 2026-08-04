@@ -2946,7 +2946,7 @@ dev = [
 [package.metadata]
 requires-dist = [
     { name = "docling", marker = "extra == 'docling'", specifier = ">=2.66" },
-    { name = "fastembed", specifier = ">=0.7" },
+    { name = "fastembed", specifier = ">=0.8" },
     { name = "httpx", specifier = ">=0.27" },
     { name = "pdfplumber", marker = "extra == 'pdf'", specifier = ">=0.10" },
     { name = "rich", specifier = ">=13" },

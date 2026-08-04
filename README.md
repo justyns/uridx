@@ -41,15 +41,18 @@ JSONL format (recommended for structured data):
 echo '{"source_uri": "note://idea/1", "title": "Project idea", "source_type": "note", "tags": ["idea"], "chunks": [{"text": "Build a semantic search tool for personal knowledge."}]}' | uridx ingest
 ```
 
-Raw text:
+Raw text — `--text` is the content, `--uri` names its source (defaulting to a
+content-addressed `text://` URI):
 ```bash
-cat document.md | uridx ingest --text "file://docs/document.md"
+uridx ingest --text "Build a semantic search tool for personal knowledge."
+uridx ingest --text "Remember to renew the domain" --uri note://todo/1
+cat document.md | uridx ingest --uri "file://docs/document.md"
 ```
 
 Add custom tags during ingest:
 ```bash
 uridx extract markdown ./notes/ --tag memory --tag 2026-03 | uridx ingest
-echo "test" | uridx ingest --text "test://uri" --tag custom --tag notes
+uridx ingest --text "test" --uri "test://uri" --tag custom --tag notes
 ```
 
 Some extractors (only maildir right now) support `-j` for parallel reading/extracting.
@@ -164,6 +167,7 @@ Environment variables:
 | `OLLAMA_EMBED_MODEL`   | `qwen3-embedding:0.6b`           | Ollama embedding model                                  |
 | `URIDX_MACHINE`        | (hostname)                       | Machine label recorded in item locations (sync)         |
 | `URIDX_RESCORE_K`      | `500`                            | Coarse vector candidates rescored per semantic search   |
+| `URIDX_MAX_CHUNK_CHARS`| `2000`                           | Max chars per chunk; longer chunks are split on ingest  |
 | `URIDX_MIN_SCORE`      | (none)                           | Default `--min-score` (cosine relevance floor)          |
 
 Example with remote Ollama:

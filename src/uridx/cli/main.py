@@ -6,6 +6,7 @@ it. They dominate startup, and `--help` and argument errors would otherwise pay 
 of them before printing anything. Enforced by ruff TID253 (see pyproject.toml).
 """
 
+import hashlib
 import json
 import sys
 from datetime import datetime
@@ -59,6 +60,15 @@ def _indent(text: str, prefix: str = "  ") -> str:
     return "\n".join(prefix + line for line in text.splitlines())
 
 
+def _emit_summary(summary: dict, failed: int) -> None:
+    """Print the run summary as JSON. A run that dropped records must not exit 0."""
+    if failed:
+        summary["failed"] = failed
+    print(json.dumps(summary))
+    if failed:
+        raise typer.Exit(1)
+
+
 def _run_record_stream(run, verb: str, out_key: str):
     """Feed stdin JSONL records through run(records, on_result) with progress; print summary counts."""
     from uridx.record import RecordError, iter_jsonl_records
@@ -74,7 +84,9 @@ def _run_record_stream(run, verb: str, out_key: str):
     except RecordError as e:
         print(f"Error: {e}", file=sys.stderr)
         raise typer.Exit(1)
-    print(json.dumps({out_key: counts["added"], "unchanged": counts["unchanged"], "merged": counts["merged"]}))
+    _emit_summary(
+        {out_key: counts["added"], "unchanged": counts["unchanged"], "merged": counts["merged"]}, counts["failed"]
+    )
 
 
 @app.command()
@@ -140,10 +152,32 @@ def search(
 
 @app.command()
 def ingest(
-    jsonl: Annotated[bool, typer.Option("--jsonl")] = False,
-    text: Annotated[Optional[str], typer.Option("--text")] = None,
+    text: Annotated[
+        Optional[str], typer.Option("--text", help="Literal text to index instead of reading stdin")
+    ] = None,
+    uri: Annotated[
+        Optional[str], typer.Option("--uri", help="Source URI for the item (default: content-addressed text:// URI)")
+    ] = None,
     tag: Annotated[Optional[list[str]], typer.Option("--tag", "-t", help="Tags for ingested items")] = None,
 ):
+    """Ingest JSONL records from stdin, or a single item given with --text / --uri.
+
+    Stdin is read as JSONL unless --text or --uri is given: --text supplies the content
+    directly, --uri means stdin is one item's raw content rather than a record stream.
+    """
+    if text is not None and not text.strip():
+        print("Error: --text is empty; there is nothing to index.", file=sys.stderr)
+        raise typer.Exit(2)
+    if text is None and sys.stdin.isatty():
+        print(
+            "Error: no input. Pipe JSONL records in, or pass --text.\n"
+            '  uridx ingest --text "some note"\n'
+            "  cat doc.md | uridx ingest --uri file://docs/doc.md\n"
+            "  uridx extract markdown ./notes/ | uridx ingest",
+            file=sys.stderr,
+        )
+        raise typer.Exit(2)
+
     from uridx.db.engine import heal_index, init_db, require_embed_model_match
     from uridx.db.operations import ingest_record, ingest_records
     from uridx.record import ChunkInput, Record
@@ -152,10 +186,16 @@ def ingest(
     heal_index()
     require_embed_model_match()
 
-    if text:
-        content = sys.stdin.read()
-        with _console().status(f"Ingesting {text}..."):
-            item, _ = ingest_record(Record(source_uri=text, chunks=[ChunkInput(text=content)], tags=tag or []))
+    if text is None and uri is not None:
+        text = sys.stdin.read()
+        if not text.strip():
+            print(f"Error: stdin was empty; nothing to index for {uri}.", file=sys.stderr)
+            raise typer.Exit(2)
+
+    if text is not None:
+        source_uri = uri or f"text://{hashlib.sha256(text.encode()).hexdigest()[:16]}"
+        with _console().status(f"Ingesting {source_uri}..."):
+            item, _ = ingest_record(Record(source_uri=source_uri, chunks=[ChunkInput(text=text)], tags=tag or []))
         print(json.dumps({"source_uri": item.source_uri, "chunks": len(item.chunks)}))
     else:
         _run_record_stream(
@@ -194,7 +234,7 @@ def add(
         raise typer.Exit(2)
 
     try:
-        buckets, skipped = resolve_dispatch(paths, extractor)
+        buckets, skipped, missing = resolve_dispatch(paths, extractor)
     except ValueError as e:
         print(f"Error: {e}", file=sys.stderr)
         raise typer.Exit(2)
@@ -205,7 +245,15 @@ def add(
                 print(f"{f}\t{name}")
         for f in skipped:
             print(f"{f}\t(no extractor)")
+        for f in missing:
+            print(f"{f}\t(missing)")
         return
+
+    if missing:
+        print(f"Error: path does not exist: {missing[0]}", file=sys.stderr)
+        for f in missing[1:]:
+            print(f"       path does not exist: {f}", file=sys.stderr)
+        raise typer.Exit(2)
 
     init_db()
     heal_index()
@@ -222,6 +270,7 @@ def add(
             plan.append((name, survivors))
 
     ingested = 0
+    failed = 0
     by_type: dict[str, int] = {}
     with _progress(console) as progress:
         task = progress.add_task("Adding...", total=None)
@@ -236,18 +285,18 @@ def add(
             try:
                 counts = ingest_records(module.iter_records(survivors, tag=tag), on_result=on_result)
                 ingested += counts["added"]
+                failed += counts["failed"]
             except MissingExtractorDependency as e:
                 print(f"Skipping {name}: {e}", file=sys.stderr)
 
-    print(
-        json.dumps(
-            {
-                "ingested": ingested,
-                "skipped_unknown": len(skipped),
-                "skipped_existing": skipped_existing,
-                "by_type": by_type,
-            }
-        )
+    _emit_summary(
+        {
+            "ingested": ingested,
+            "skipped_unknown": len(skipped),
+            "skipped_existing": skipped_existing,
+            "by_type": by_type,
+        },
+        failed,
     )
 
 

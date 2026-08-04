@@ -16,7 +16,7 @@ from sqlmodel import select
 
 from uridx.db.engine import get_session, get_setting
 from uridx.db.models import Item
-from uridx.db.operations import IngestStatus, ingest_records, read_chunk_embeddings
+from uridx.db.operations import IngestCounts, IngestStatus, ingest_records, read_chunk_embeddings
 from uridx.embeddings import deserialize_embedding
 from uridx.record import ChunkInput, LocationInput, Record
 
@@ -113,7 +113,7 @@ def _decode_embeddings(record: Record, model_id: str | None, dim: int | None) ->
 def import_records(
     records: Iterable[Record],
     on_result: Callable[[Record, IngestStatus], None] | None = None,
-) -> dict[IngestStatus, int]:
+) -> IngestCounts:
     """Ingest an export stream, passing embeddings through when the model matches."""
     model_id, dim = _embed_settings()
     return ingest_records(records, on_result=on_result, precomputed=lambda r: _decode_embeddings(r, model_id, dim))

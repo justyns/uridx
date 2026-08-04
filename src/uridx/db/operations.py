@@ -12,31 +12,35 @@ carries an `updated_at`:
   dirty, or every sync would echo back out on the next export.
 """
 
-import hashlib
 import json
+import sys
 from collections.abc import Callable, Iterable
 from datetime import datetime
 from typing import Literal
 
 from sqlmodel import func, select
 
+from uridx.chunking import prepare_record
 from uridx.config import get_machine_id
 from uridx.db.engine import get_session
 from uridx.db.models import Chunk, Item, Location, Setting, Tag
 from uridx.db.schema import create_embeddings_tables
-from uridx.embeddings import get_dimension, get_embeddings_sync, get_model_id, serialize_embedding
-from uridx.record import TITLE_CHUNK_KEY, ChunkInput, Record
+from uridx.embeddings import (
+    EmbeddingBackendError,
+    get_dimension,
+    get_embeddings_sync,
+    get_model_id,
+    serialize_embedding,
+)
+from uridx.record import Record
 from uridx.timeutil import to_naive_utc, utcnow
 
 IngestStatus = Literal["added", "unchanged", "merged"]
+IngestCounts = dict[IngestStatus | Literal["failed"], int]
 
 EMBED_BATCH_CHUNKS = 64
-
-
-def compute_content_hash(chunks: list[ChunkInput]) -> str:
-    """Compute SHA256 hash of chunk texts for change detection."""
-    content = "\n".join(c.text for c in chunks)
-    return hashlib.sha256(content.encode()).hexdigest()[:32]
+# Consecutive per-record embedding failures that mean the backend is down, not the content.
+EMBED_GIVE_UP_AFTER = 3
 
 
 def _delete_chunk_embeddings(session, chunk_ids: list[int]) -> None:
@@ -216,18 +220,6 @@ def _create_item(
     return item
 
 
-def prepare_record(record: Record) -> str:
-    """Normalize a record for indexing and return its content hash.
-
-    Prepends the title as its own chunk so it's searchable (FTS + vector), unless one
-    is already there (import round-trips). Runs before hashing, so retitling an item
-    counts as a content change.
-    """
-    if record.title and not any(c.key == TITLE_CHUNK_KEY for c in record.chunks):
-        record.chunks.insert(0, ChunkInput(text=record.title, key=TITLE_CHUNK_KEY))
-    return compute_content_hash(record.chunks)
-
-
 def ingest_record(
     record: Record,
     *,
@@ -270,6 +262,54 @@ def ingest_record(
         return _detach_item(session, item), status
 
 
+def _split_by_record(vectors: list[list[float]], records: dict[str, Record]) -> dict[str, list[list[float]]]:
+    """Deal a flat vector list back out to the records that produced the texts."""
+    expected = sum(len(rec.chunks) for rec in records.values())
+    if len(vectors) != expected:
+        raise EmbeddingBackendError(f"embedding backend returned {len(vectors)} vectors for {expected} texts")
+    it = iter(vectors)
+    return {h: [next(it) for _ in rec.chunks] for h, rec in records.items()}
+
+
+class _Embedder:
+    """Embeds batches of records, retrying one at a time so a bad record can't kill the run.
+
+    The streak spans batches, since a stream of large records arrives one per batch:
+    enough failures in a row means the backend is down, not the content, so it gives up
+    rather than pay every remaining record's retry backoff.
+    """
+
+    def __init__(self) -> None:
+        self.failures_in_a_row = 0
+
+    def embed(self, to_embed: dict[str, Record]) -> tuple[dict[str, list[list[float]]], set[str]]:
+        """Return (vectors by hash, hashes that failed and must be skipped)."""
+        if len(to_embed) > 1:
+            texts = [c.text for rec in to_embed.values() for c in rec.chunks]
+            try:
+                vectors = _split_by_record(get_embeddings_sync(texts), to_embed)
+                self.failures_in_a_row = 0
+                return vectors, set()
+            except EmbeddingBackendError as e:
+                print(f"Warning: embedding a batch of {len(to_embed)} failed ({e}); one at a time", file=sys.stderr)
+
+        embedded: dict[str, list[list[float]]] = {}
+        failed: set[str] = set()
+        for h, rec in to_embed.items():
+            try:
+                embedded[h] = _split_by_record(get_embeddings_sync([c.text for c in rec.chunks]), {h: rec})[h]
+                self.failures_in_a_row = 0
+            except EmbeddingBackendError as e:
+                print(f"Error embedding {rec.source_uri}: {e}", file=sys.stderr)
+                failed.add(h)
+                self.failures_in_a_row += 1
+                if self.failures_in_a_row >= EMBED_GIVE_UP_AFTER:
+                    raise EmbeddingBackendError(
+                        f"{self.failures_in_a_row} records failed to embed in a row, giving up"
+                    ) from e
+        return embedded, failed
+
+
 def ingest_records(
     records: Iterable[Record],
     *,
@@ -277,7 +317,7 @@ def ingest_records(
     on_result: Callable[[Record, IngestStatus], None] | None = None,
     batch_chunks: int = EMBED_BATCH_CHUNKS,
     precomputed: Callable[[Record], list[list[float]] | None] | None = None,
-) -> dict[IngestStatus, int]:
+) -> IngestCounts:
     """Ingest a record stream, batching embedding calls across records.
 
     Buffers records until ~batch_chunks chunks accumulate, then embeds all new
@@ -294,39 +334,46 @@ def ingest_records(
     source skips per-record DB work entirely. Disabled per record when extra_tags
     are given or the record carries sync provenance (updated_at/locations), since
     those must still merge into the existing item.
+
+    Records whose embeddings fail are counted "failed" and skipped; the run continues.
     """
-    counts: dict[IngestStatus, int] = {"added": 0, "unchanged": 0, "merged": 0}
+    counts: IngestCounts = {"added": 0, "unchanged": 0, "merged": 0, "failed": 0}
     batch: list[tuple[Record, str]] = []
+    embedder = _Embedder()
 
     def flush():
         if not batch:
             return
-        hashes = {h for _, h in batch}
-        with get_session() as session:
-            known_pairs = set(
-                session.exec(select(Item.content_hash, Item.source_uri).where(Item.content_hash.in_(hashes))).all()
-            )
-        known = {h for h, _ in known_pairs}
-        to_embed = {h: rec for rec, h in batch if h not in known}  # one representative per unique new hash
-        embeddings_by_hash = {}
-        if precomputed:
-            embeddings_by_hash = {h: v for h, rec in to_embed.items() if (v := precomputed(rec)) is not None}
-            to_embed = {h: rec for h, rec in to_embed.items() if h not in embeddings_by_hash}
-        texts = [c.text for rec in to_embed.values() for c in rec.chunks]
-        embedded = iter(get_embeddings_sync(texts)) if texts else iter(())
-        embeddings_by_hash |= {h: [next(embedded) for _ in rec.chunks] for h, rec in to_embed.items()}
-        for rec, h in batch:
-            skippable = not extra_tags and rec.updated_at is None and rec.locations is None
-            if skippable and (h, rec.source_uri) in known_pairs:
-                status = "unchanged"
-            else:
-                _, status = ingest_record(
-                    rec, extra_tags=extra_tags, embeddings=embeddings_by_hash.get(h), content_hash=h
+        try:
+            hashes = {h for _, h in batch}
+            with get_session() as session:
+                known_pairs = set(
+                    session.exec(select(Item.content_hash, Item.source_uri).where(Item.content_hash.in_(hashes))).all()
                 )
-            counts[status] += 1
-            if on_result:
-                on_result(rec, status)
-        batch.clear()
+            known = {h for h, _ in known_pairs}
+            to_embed = {h: rec for rec, h in batch if h not in known}  # one representative per unique new hash
+            embeddings_by_hash = {}
+            if precomputed:
+                embeddings_by_hash = {h: v for h, rec in to_embed.items() if (v := precomputed(rec)) is not None}
+                to_embed = {h: rec for h, rec in to_embed.items() if h not in embeddings_by_hash}
+            embedded, failed = embedder.embed(to_embed)
+            embeddings_by_hash |= embedded
+            for rec, h in batch:
+                if h in failed:
+                    counts["failed"] += 1
+                    continue
+                skippable = not extra_tags and rec.updated_at is None and rec.locations is None
+                if skippable and (h, rec.source_uri) in known_pairs:
+                    status = "unchanged"
+                else:
+                    _, status = ingest_record(
+                        rec, extra_tags=extra_tags, embeddings=embeddings_by_hash.get(h), content_hash=h
+                    )
+                counts[status] += 1
+                if on_result:
+                    on_result(rec, status)
+        finally:
+            batch.clear()  # or a raising flush() leaves it full and the outer finally re-runs it
 
     try:
         for record in records:

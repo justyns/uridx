@@ -7,6 +7,8 @@ URIDX_DB_PATH = Path(os.getenv("URIDX_DB_PATH", Path.home() / ".local/share/urid
 URIDX_EMBEDDINGS = os.getenv("URIDX_EMBEDDINGS", "fastembed")  # "fastembed" or "ollama"
 FASTEMBED_MODEL = os.getenv("FASTEMBED_MODEL", "nomic-ai/nomic-embed-text-v1.5")
 
+URIDX_MAX_CHUNK_CHARS = int(os.getenv("URIDX_MAX_CHUNK_CHARS", "2000"))
+
 OLLAMA_BASE_URL = os.getenv("OLLAMA_BASE_URL", "http://localhost:11434")
 OLLAMA_EMBED_MODEL = os.getenv("OLLAMA_EMBED_MODEL", "qwen3-embedding:0.6b")
 
