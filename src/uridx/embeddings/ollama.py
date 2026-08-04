@@ -25,16 +25,20 @@ def _warn_retry(attempt: int, exc: Exception) -> None:
 
 
 def _post(client: httpx.Client, url: str, payload: dict) -> dict:
-    """POST with retries on transient network errors (timeouts, dropped connections)."""
+    """POST with retries on transient network errors (timeouts, dropped connections) and 429/5xx."""
     for attempt in range(1, ATTEMPTS + 1):
         try:
             response = client.post(url, json=payload)
             response.raise_for_status()
             return response.json()
         except httpx.HTTPStatusError as e:
-            raise EmbeddingBackendError(
-                f"HTTP {e.response.status_code} from {e.request.url.path}: {e.response.text.strip()}"
-            ) from e
+            status = e.response.status_code
+            # A busy or briefly restarting server is worth waiting out; other 4xx is not.
+            if (status == 429 or status >= 500) and attempt < ATTEMPTS:
+                _warn_retry(attempt, e)
+                time.sleep(2 * attempt)
+                continue
+            raise EmbeddingBackendError(f"HTTP {status} from {e.request.url.path}: {e.response.text.strip()}") from e
         except httpx.TransportError as e:
             if attempt == ATTEMPTS:
                 raise EmbeddingBackendError(

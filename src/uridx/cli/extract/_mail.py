@@ -23,11 +23,10 @@ from email.utils import parsedate_to_datetime
 from enum import Enum
 from html.parser import HTMLParser
 
+from uridx.chunking import split_text
+from uridx.config import URIDX_MAX_CHUNK_CHARS
 from uridx.record import ChunkInput, Record
 
-from .base import split_text
-
-MAX_CHARS = 2000
 # Cap chunks per message: machine-generated mail (log/report bodies) can run to
 # megabytes; index the head so the message stays findable, tag it `truncated`.
 MAX_CHUNKS = 200
@@ -208,7 +207,7 @@ def _message_chunks(m: Msg) -> tuple[list[ChunkInput], bool]:
         header.append(f"Subject: {m.subject}")
     text = "\n".join(header) + "\n\n" + m.body
     meta = {"message_id": m.message_id}
-    pieces = split_text(text, MAX_CHARS)
+    pieces = split_text(text, URIDX_MAX_CHUNK_CHARS)
     chunks = [ChunkInput(text=piece, key=str(i), meta=meta) for i, piece in enumerate(pieces[:MAX_CHUNKS])]
     return chunks, len(pieces) > MAX_CHUNKS
 
