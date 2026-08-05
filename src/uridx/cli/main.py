@@ -268,12 +268,13 @@ def add(
         skipped_existing += len(files) - len(survivors)
         if survivors:
             plan.append((name, survivors))
+    total_files = sum(len(survivors) for _, survivors in plan)
 
     ingested = 0
     failed = 0
     by_type: dict[str, int] = {}
     with _progress(console) as progress:
-        task = progress.add_task("Adding...", total=None)
+        task = progress.add_task("Adding...", total=total_files)
         for name, survivors in plan:
             module = load_extractor(name)
 
