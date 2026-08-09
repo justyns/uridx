@@ -8,6 +8,7 @@ marking items dirty (no sync echo).
 
 import base64
 import json
+import struct
 from collections.abc import Callable, Iterable, Iterator
 from datetime import datetime
 
@@ -18,7 +19,7 @@ from uridx.db.engine import get_session, get_setting
 from uridx.db.models import Item
 from uridx.db.operations import IngestCounts, IngestStatus, ingest_records, read_chunk_embeddings
 from uridx.embeddings import deserialize_embedding
-from uridx.record import ChunkInput, LocationInput, Record
+from uridx.record import ChunkInput, LocationInput, Record, RecordError
 
 EXPORT_PAGE_ITEMS = 100
 
@@ -99,15 +100,18 @@ def _export_record(item: Item, blobs: dict[int, bytes], embed_model: str | None,
 
 
 def _decode_embeddings(record: Record, model_id: str | None, dim: int | None) -> list[list[float]] | None:
-    """Decode a record's embeddings iff they match the local model; None means recompute."""
+    """Decode a record's embeddings iff they match the local model; None means recompute.
+
+    A blob that won't decode means a corrupt export stream, not a reason to re-embed.
+    """
     if not model_id or not dim or record.embed_model != model_id or record.embed_dim != dim:
         return None
     if not record.chunks or any(c.embedding is None for c in record.chunks):
         return None
     try:
         return [deserialize_embedding(base64.b64decode(c.embedding), dim) for c in record.chunks]
-    except Exception:
-        return None
+    except (ValueError, struct.error) as e:
+        raise RecordError(f"{record.source_uri}: corrupt embedding blob ({e})") from e
 
 
 def import_records(
