@@ -3,10 +3,10 @@
 Two merge policies run through the write path, selected by whether an incoming record
 carries an `updated_at`:
 
-- **local** (no `updated_at`) — this machine just read the source, so it is
+- **local** (no `updated_at`). This machine just read the source, so it is
   authoritative: metadata is overwritten, the tag set is replaced wholesale, and
   `updated_at` bumps to now whenever something actually changed.
-- **sync** (`updated_at` present) — the record came from another machine's index, so
+- **sync** (`updated_at` present). The record came from another machine's index, so
   metadata competes on timestamp (last writer wins) and tags union. A peer that never
   saw a tag must not delete it, and re-importing unchanged data must not mark the item
   dirty, or every sync would echo back out on the next export.
@@ -227,17 +227,17 @@ def ingest_record(
     embeddings: list[list[float]] | None = None,
     content_hash: str | None = None,
 ) -> tuple[Item, IngestStatus]:
-    """Upsert one Record — the single write path into the index. Returns (item, status).
+    """Upsert one Record, the single write path into the index. Returns (item, status).
 
     Three outcomes, keyed on content hash: the URI is already indexed with this exact
     content ("unchanged"), the content is already indexed under a different URI
-    ("merged" — the new URI becomes another location of the one item), or it is new
+    ("merged": the new URI becomes another location of the one item), or it is new
     ("added"; a URI whose content changed is deleted and re-added).
 
-    `record.updated_at` selects the merge policy — see the module docstring. Pass `embeddings`
+    `record.updated_at` selects the merge policy; see the module docstring. Pass `embeddings`
     (one per chunk) and/or `content_hash` to reuse work the caller already did.
 
-    Does NOT init the DB — the caller must call init_db() once before looping.
+    Does NOT init the DB; the caller must call init_db() once before looping.
     """
     content_hash = content_hash or prepare_record(record)
     tags = list(dict.fromkeys(record.tags + (extra_tags or [])))
@@ -322,7 +322,7 @@ def ingest_records(
 
     Buffers records until ~batch_chunks chunks accumulate, then embeds all new
     content in one call: one query partitions the batch into known content (hash
-    already indexed — no embedding) and new content (embedded once per unique
+    already indexed, so no embedding) and new content (embedded once per unique
     hash, so intra-batch duplicates aren't re-embedded). Shared by `ingest` and
     `add`. Returns counts by status; on_result fires per record as it lands.
 
@@ -330,7 +330,7 @@ def ingest_records(
     pass-through); records it returns None for are batch-embedded as usual.
 
     Fast path: records whose (content_hash, source_uri) already exist are counted
-    "unchanged" without touching the item at all — a re-run over an already-indexed
+    "unchanged" without touching the item at all, so a re-run over an already-indexed
     source skips per-record DB work entirely. Disabled per record when extra_tags
     are given or the record carries sync provenance (updated_at/locations), since
     those must still merge into the existing item.

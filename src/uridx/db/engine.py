@@ -2,7 +2,7 @@
 
 Every reader and writer goes through this engine. sqlite-vec is loaded onto each
 pooled connection as it opens, so its scalar functions are available to plain
-`session.connection().exec_driver_sql(...)` — there is no second, separately-opened
+`session.connection().exec_driver_sql(...)`. There is no second, separately-opened
 sqlite3 handle, and raw vector SQL shares a transaction with the ORM writes around it.
 """
 
@@ -28,8 +28,8 @@ def _vec_extension_path() -> str:
     """Path to the bundled sqlite-vec loadable extension, without importing the package.
 
     `import sqlite_vec` pulls in numpy.typing through a try-block for register_numpy,
-    which uridx never uses and which is a meaningful chunk of startup. Only the path
-    is needed, and resolving it does not require executing the package.
+    which uridx never uses and which is not cheap to import. Only the path is needed,
+    and resolving it does not require executing the package.
     """
     spec = importlib.util.find_spec("sqlite_vec")
     if spec is None or not spec.origin:

@@ -1,4 +1,4 @@
-"""Query processing for FTS5 search — stopword removal and term sanitization."""
+"""Query processing for FTS5 search: stopword removal and term sanitization."""
 
 from __future__ import annotations
 

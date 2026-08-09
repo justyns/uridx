@@ -17,11 +17,11 @@ uv run uridx --help                  # CLI help
 
 ## Architecture
 
-**Data Flow**: CLI → operations.py → SQLite + sqlite-vec + FTS5
+**Data Flow**: CLI -> operations.py -> SQLite + sqlite-vec + FTS5
 
 - **CLI** (`cli/main.py`): Typer app with `add`, `ingest`, `search`, `stats`, `delete`, `export`, `import` commands, plus an `extract` subcommand group
 - **Sync** (`sync.py`): `export`/`import` stream the index as JSONL (a `Record` superset with timestamps, locations, optional base64 embeddings) for multi-machine federation via ssh pipes; import preserves origin machines/timestamps (last-writer-wins) and reuses embeddings only when the model matches.
-- **Ingestion model**: `extract <type> … | ingest` is the composable plumbing (extractors emit JSONL → `ingest` consumes stdin). `add <path>` is porcelain over it: it auto-detects the extractor by file extension (`cli/extract/registry.py`) and runs the same `iter_records` generators in-process. File-drop extractors (`markdown`, `pdf`, `image`, `docling`) expose `iter_records()`; structured sources (`tsugite`, `claude_code`) are `extract`-only.
+- **Ingestion model**: `extract <type> … | ingest` is the composable plumbing (extractors emit JSONL -> `ingest` consumes stdin). `add <path>` is porcelain over it: it auto-detects the extractor by file extension (`cli/extract/registry.py`) and runs the same `iter_records` generators in-process. File-drop extractors (`markdown`, `pdf`, `image`, `docling`) expose `iter_records()`; structured sources (`tsugite`, `claude_code`) are `extract`-only.
 - **Search** (`search/hybrid.py`): Combines vector search (70% weight) with BM25 (30% weight) via `SearchResult` dataclass
 - **Database** (`db/`):
   - `models.py`: SQLModel tables - Item, Chunk, Tag, Setting
@@ -38,7 +38,7 @@ uv run uridx --help                  # CLI help
 **Database Schema**:
 - Regular tables: `item`, `chunk`, `tag`, `setting` (via SQLModel)
 - Virtual tables: `chunks_fts` (fts5 with triggers)
-- Vector tables (plain, not vec0 — sqlite-vec is used only for its scalar functions): `chunk_embeddings` (float32 blobs — exact rescore + export) and `chunk_embeddings_bq` (derived sign-bit blobs — coarse hamming pass; re-derived by `heal_index()`, which write commands call after `init_db()`)
+- Vector tables (plain, not vec0; sqlite-vec is used only for its scalar functions): `chunk_embeddings` (float32 blobs, for exact rescore + export) and `chunk_embeddings_bq` (derived sign-bit blobs, for the coarse hamming pass; re-derived by `heal_index()`, which write commands call after `init_db()`)
 
 **Startup cost**: every command pays process + import + schema time before it does any work.
 - `db/schema.py` migrations are full table scans, so `apply_schema` runs them only when the stored `schema_version` setting is behind `SCHEMA_VERSION`. Bump that constant when a migration must re-run on databases that already ran the others.

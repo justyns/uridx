@@ -4,19 +4,22 @@ import json
 import sys
 from collections.abc import Iterator
 from pathlib import Path
-from typing import Annotated, Optional
+from typing import TYPE_CHECKING, Annotated, Optional
 
 import typer
 
-from uridx.record import Record
-
 from .base import MissingExtractorDependency, file_uri, output, prepare_files
+
+if TYPE_CHECKING:
+    from uridx.record import Record
 
 EXTENSIONS = {".pdf"}
 
 
-def iter_records(files: list[Path], *, tag: Optional[list[str]] = None) -> Iterator[Record]:
+def iter_records(files: list[Path], *, tag: Optional[list[str]] = None) -> Iterator["Record"]:
     """Yield ingest records for PDF files, one chunk per page (requires pdfplumber)."""
+    from uridx.record import Record
+
     try:
         import pdfplumber
     except ImportError as e:

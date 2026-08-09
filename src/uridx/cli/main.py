@@ -313,7 +313,7 @@ def export(
     """Export the index as JSONL for import on another machine.
 
     Streams the indexed text-representation (chunks, tags, locations, optional
-    embeddings) — not the original source files. Pipe to `uridx import`:
+    embeddings), not the original source files. Pipe to `uridx import`:
     `uridx export | ssh uridx@hub uridx import`.
     """
     from uridx.cli.extract.base import output
@@ -405,7 +405,7 @@ def reindex():
     """Re-embed all chunks with the current embedding backend/model.
 
     Rebuilds only the vector table (at the new model's dimension) from chunk text
-    already in the DB — no re-extraction needed. Use after changing URIDX_EMBEDDINGS,
+    already in the DB, so no re-extraction is needed. Use after changing URIDX_EMBEDDINGS,
     FASTEMBED_MODEL, or OLLAMA_EMBED_MODEL.
     """
     from uridx.db.engine import init_db

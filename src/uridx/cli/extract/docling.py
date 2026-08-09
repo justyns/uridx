@@ -4,14 +4,15 @@ import json
 import sys
 from collections.abc import Iterator
 from pathlib import Path
-from typing import Annotated, Optional, Union
+from typing import TYPE_CHECKING, Annotated, Optional, Union
 from urllib.parse import urlparse
 
 import typer
 
-from uridx.record import Record
-
 from .base import MissingExtractorDependency, drop_indexed, file_uri, get_file_mtime, output, resolve_paths
+
+if TYPE_CHECKING:
+    from uridx.record import Record
 
 EXTENSIONS = {
     ".pdf",
@@ -33,7 +34,7 @@ EXTENSIONS = {
 }
 
 
-def iter_records(sources: list[Union[str, Path]], *, tag: Optional[list[str]] = None) -> Iterator[Record]:
+def iter_records(sources: list[Union[str, Path]], *, tag: Optional[list[str]] = None) -> Iterator["Record"]:
     """Yield ingest records for docling-supported sources (local files or http(s) URLs).
 
     `add` passes local Paths only; the `extract` wrapper may also pass URL strings.
@@ -91,8 +92,10 @@ def extract(
 
 def _build_record(
     converter, chunker, source: str, source_uri: str, created_at: str | None, extra_tags: list[str]
-) -> Optional[Record]:
+) -> Optional["Record"]:
     """Convert a single source and return an ingest record (or None on error/empty)."""
+    from uridx.record import Record
+
     try:
         result = converter.convert(source)
         doc = result.document

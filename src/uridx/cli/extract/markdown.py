@@ -5,13 +5,14 @@ import re
 import sys
 from collections.abc import Iterator
 from pathlib import Path
-from typing import Annotated, Optional
+from typing import TYPE_CHECKING, Annotated, Optional
 
 import typer
 
-from uridx.record import Record
-
 from .base import file_uri, get_file_mtime, output, prepare_files
+
+if TYPE_CHECKING:
+    from uridx.record import Record
 
 EXTENSIONS = {".md", ".mdc", ".markdown"}
 MIN_CHUNK_SIZE = 100
@@ -109,8 +110,10 @@ def _parse(path: Path) -> list[dict]:
     return _merge_small_chunks(chunks)
 
 
-def iter_records(files: list[Path], *, tag: Optional[list[str]] = None) -> Iterator[Record]:
+def iter_records(files: list[Path], *, tag: Optional[list[str]] = None) -> Iterator["Record"]:
     """Yield ingest records for markdown files, splitting by headings."""
+    from uridx.record import Record
+
     for md_file in files:
         try:
             chunks = _parse(md_file)

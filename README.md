@@ -41,7 +41,7 @@ JSONL format (recommended for structured data):
 echo '{"source_uri": "note://idea/1", "title": "Project idea", "source_type": "note", "tags": ["idea"], "chunks": [{"text": "Build a semantic search tool for personal knowledge."}]}' | uridx ingest
 ```
 
-Raw text — `--text` is the content, `--uri` names its source (defaulting to a
+Raw text. `--text` is the content, `--uri` names its source (defaulting to a
 content-addressed `text://` URI):
 ```bash
 uridx ingest --text "Build a semantic search tool for personal knowledge."
@@ -108,7 +108,7 @@ Results print as `[score] (rel N) source_uri`. The two numbers mean different th
 
 Pick a `--min-score` by running a query you know should match nothing and looking at the
 `rel` values it returns; anything at or below that is noise. The useful floor depends on
-the embedding model — unrelated text sits around 0.4-0.5 for `qwen3-embedding:0.6b`, so
+the embedding model: unrelated text sits around 0.4-0.5 for `qwen3-embedding:0.6b`, so
 0.6 is a reasonable starting point there. Keyword-only search (`--no-semantic`) never
 embeds the query, so it reports no `rel` and ignores `--min-score`.
 
@@ -134,7 +134,7 @@ uridx stats
 ### Export / import (multi-machine)
 
 Stream the index (chunk text, tags, locations, optional embeddings) as JSONL to
-another machine — the original source files stay where they are, search works
+another machine. The original source files stay where they are, search works
 offline everywhere, and results point back at the owning machine.
 
 ```bash
@@ -150,7 +150,7 @@ uridx export --since 2026-07-01 --type markdown --no-embeddings
 
 Imports are idempotent: identical content merges by hash (one item, a location
 per machine), timestamps and origin machines are preserved, and embeddings are
-reused when the embedding model matches — otherwise recomputed locally from the
+reused when the embedding model matches, otherwise recomputed locally from the
 chunk text, so machines may run different models.
 
 ## Configuration

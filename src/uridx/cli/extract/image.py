@@ -6,14 +6,16 @@ import os
 import sys
 from collections.abc import Iterator
 from pathlib import Path
-from typing import Annotated, Optional
+from typing import TYPE_CHECKING, Annotated, Optional
 
 import typer
 
-from uridx.config import normalize_ollama_url
-from uridx.record import Record
+from uridx.config import OLLAMA_BASE_URL, normalize_ollama_url
 
 from .base import MissingExtractorDependency, file_uri, get_file_mtime, output, prepare_files
+
+if TYPE_CHECKING:
+    from uridx.record import Record
 
 EXTENSIONS = {".jpg", ".jpeg", ".png", ".gif", ".webp", ".bmp"}
 
@@ -24,7 +26,7 @@ def iter_records(
     tag: Optional[list[str]] = None,
     model: Optional[str] = None,
     base_url: Optional[str] = None,
-) -> Iterator[Record]:
+) -> Iterator["Record"]:
     """Yield ingest records describing images via an Ollama vision model.
 
     model/base_url default from env (OLLAMA_VISION_MODEL/OLLAMA_BASE_URL) so a generic
@@ -33,7 +35,9 @@ def iter_records(
     """
     import httpx  # deferred: only this extractor needs it, and importing it is not cheap
 
-    ollama_url = normalize_ollama_url(base_url or os.getenv("OLLAMA_BASE_URL", "http://localhost:11434"))
+    from uridx.record import Record
+
+    ollama_url = normalize_ollama_url(base_url or OLLAMA_BASE_URL)
     vision_model = model or os.getenv("OLLAMA_VISION_MODEL", "llama3.2-vision")
 
     with httpx.Client(timeout=120.0) as client:

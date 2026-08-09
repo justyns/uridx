@@ -40,8 +40,10 @@ banned-module-level-imports = [
     "rich",
     "sqlalchemy",
     "sqlmodel",
+    "uridx.chunking",
     "uridx.db",
     "uridx.embeddings",
+    "uridx.record",
     "uridx.search",
     "uridx.sync",
 ]

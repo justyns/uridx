@@ -6,22 +6,24 @@ from collections.abc import Iterator
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
-from typing import Annotated, Optional
+from typing import TYPE_CHECKING, Annotated, Optional
 
 import typer
 
-from uridx.record import ChunkInput, Record
 from uridx.timeutil import to_aware_utc
 
 from ._turns import Role, build_turn_chunks
 from .base import drop_indexed, output
+
+if TYPE_CHECKING:
+    from uridx.record import ChunkInput
 
 
 @dataclass
 class ParsedConversation:
     """A parsed Claude Code conversation: turn chunks, title, metadata, and last activity."""
 
-    chunks: list[ChunkInput]
+    chunks: list["ChunkInput"]
     title: str
     metadata: dict
     started_at: str | None
@@ -135,6 +137,8 @@ def extract(
     tag: Annotated[Optional[list[str]], typer.Option("--tag", "-t", help="Additional tags")] = None,
 ):
     """Extract Claude Code conversations from ~/.claude/projects/"""
+    from uridx.record import Record
+
     projects_dir = path or (Path.home() / ".claude" / "projects")
 
     if not projects_dir.exists():

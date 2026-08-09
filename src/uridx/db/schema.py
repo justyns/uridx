@@ -1,8 +1,8 @@
 """The parts of the schema SQLModel does not model, and the migrations that heal them.
 
 SQLModel's `create_all` owns the plain tables (item, chunk, tag, location, setting).
-This module owns everything hand-rolled — the FTS5 virtual table and its triggers,
-and the vector tables — plus the in-place migrations that bring an older database up
+This module owns everything hand-rolled (the FTS5 virtual table and its triggers,
+and the vector tables) plus the in-place migrations that bring an older database up
 to the current shape. Every function takes a SQLAlchemy Connection and runs in that
 connection's transaction, except _migrate_vec0_table, which commits as it goes to
 keep the WAL bounded while copying a large vector table.
@@ -29,7 +29,7 @@ def _sql_for(conn: Connection, kind: str, name: str) -> str | None:
 
 
 def create_embeddings_tables(conn: Connection) -> None:
-    """Create the vector tables — the one definition of the vector schema.
+    """Create the vector tables, the one definition of the vector schema.
 
     Both are plain tables on purpose (sqlite-vec is used only for its scalar
     functions): vec0 virtual tables cost ~2x more to scan row-by-row and read a

@@ -4,9 +4,10 @@ import sys
 from collections.abc import Callable
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import TypeVar
+from typing import TYPE_CHECKING, TypeVar
 
-from uridx.record import Record
+if TYPE_CHECKING:
+    from uridx.record import Record
 
 T = TypeVar("T")
 
@@ -31,7 +32,7 @@ def get_file_mtime(path: Path) -> str:
     return datetime.fromtimestamp(mtime, tz=timezone.utc).isoformat()
 
 
-def output(record: Record) -> None:
+def output(record: "Record") -> None:
     """Print a record as one JSONL line (omitting unset/None fields)."""
     print(record.model_dump_json(exclude_none=True), flush=True)
 

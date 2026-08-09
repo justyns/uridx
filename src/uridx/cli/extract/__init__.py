@@ -1,8 +1,4 @@
-"""Extract subcommands with plugin support.
-
-Built-in extractors and plugin discovery via entry points.
-Plugins register under 'uridx.extractors' entry point group.
-"""
+"""Extract subcommands. Plugins register under the 'uridx.extractors' entry point group."""
 
 import sys
 from importlib.metadata import entry_points
@@ -25,12 +21,7 @@ app.command("mbox")(mbox.extract)
 
 def load_plugins():
     """Load extractor plugins from entry points."""
-    try:
-        eps = entry_points(group="uridx.extractors")
-    except TypeError:
-        eps = entry_points().get("uridx.extractors", [])
-
-    for ep in eps:
+    for ep in entry_points(group="uridx.extractors"):
         try:
             extractor = ep.load()
             if isinstance(extractor, typer.Typer):

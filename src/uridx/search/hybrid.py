@@ -19,7 +19,8 @@ class SearchResult:
     chunk_text: str
     score: float
     """Rank within this result set, in (0, 1]. Relative: the best hit always scores 1.0,
-    however good or bad it is. Use it to order results, never to judge them."""
+    however good or bad it is. Use it to order results, never to judge them.
+    0.0 for the unranked empty-query listing, which orders by date instead."""
     tags: list[str] = field(default_factory=list)
     created_at: datetime | None = None
     relevance: float | None = None
@@ -34,7 +35,7 @@ def _rrf(result_lists: list[list[tuple[int, float]]], k: int = 60) -> list[tuple
     Each input list is [(doc_id, score)] ordered by the source ranker; only the
     ordering is used, never the raw score. Returns [(doc_id, normalized_score)] in
     (0, 1] sorted descending. Also used with a single list, to put one ranker's
-    output on that same scale — the rest of the pipeline (recency mixing, min_score,
+    output on that same scale: the rest of the pipeline (recency mixing, min_score,
     the final sort) assumes higher is better and O(1) magnitudes.
     """
     fused: dict[int, float] = {}
@@ -151,7 +152,7 @@ def _vector_search(conn, embedding_blob: bytes, limit: int) -> list[tuple[int, f
         return []
     placeholders = ",".join("?" * len(candidates))
     return conn.exec_driver_sql(
-        f"SELECT chunk_id, vec_distance_cosine(embedding, ?) AS distance FROM chunk_embeddings "
+        "SELECT chunk_id, vec_distance_cosine(embedding, ?) AS distance FROM chunk_embeddings "
         f"WHERE chunk_id IN ({placeholders}) ORDER BY distance LIMIT ?",
         (embedding_blob, *candidates, limit),
     ).fetchall()
@@ -167,7 +168,7 @@ def _relevance_by_chunk(conn, embedding_blob: bytes, chunk_ids: list[int]) -> di
         return {}
     placeholders = ",".join("?" * len(chunk_ids))
     rows = conn.exec_driver_sql(
-        f"SELECT chunk_id, 1.0 - vec_distance_cosine(embedding, ?) FROM chunk_embeddings "
+        "SELECT chunk_id, 1.0 - vec_distance_cosine(embedding, ?) FROM chunk_embeddings "
         f"WHERE chunk_id IN ({placeholders})",
         (embedding_blob, *chunk_ids),
     )
@@ -180,8 +181,8 @@ MAX_AGE_DAYS = 365.0
 def _recency_score(created_at: datetime | None, now: datetime) -> float:
     """Freshness in [0, 1]: 1 for today, falling linearly to 0 at MAX_AGE_DAYS and older.
 
-    Clamped at both ends. Without the upper clamp a source dated in the future — a
-    restored archive, a skewed clock, a touched mtime — scores above 1 without bound
+    Clamped at both ends. Without the upper clamp a source dated in the future (a
+    restored archive, a skewed clock, a touched mtime) scores above 1 without bound
     and swamps the relevance term it is supposed to be nudging.
     """
     if created_at is None:
@@ -216,7 +217,7 @@ def hybrid_search(
     """Rank chunks against the query, fusing BM25 and vector search.
 
     Ordering comes from Reciprocal Rank Fusion, optionally nudged by recency.
-    `min_score` is a floor on cosine *relevance*, not on the fused rank score — the
+    `min_score` is a floor on cosine *relevance*, not on the fused rank score: the
     top-ranked hit is always 1.0 even for a query matching nothing, so thresholding
     the rank could never drop a bad result. It therefore only applies to semantic
     search; keyword-only search never embeds the query and has no relevance to test.

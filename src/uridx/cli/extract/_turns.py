@@ -3,23 +3,26 @@
 Claude Code (JSONL transcripts) and Tsugite (an event-sourced SQLite history) store
 conversations completely differently, but both read back the same way: a user message
 plus everything the assistant said before the next one. Each extractor reduces its own
-format to a `(role, text)` stream and hands it here, so the turn shape — the chunk key,
-the "User:"/"Assistant:" framing, the turn_index metadata — is defined once.
+format to a `(role, text)` stream and hands it here, so the turn shape (the chunk key,
+the "User:"/"Assistant:" framing, the turn_index metadata) is defined once.
 
 Not named `turns.py`: a leading underscore marks the shared helpers in this package
 that are not themselves `extract` subcommands.
 """
 
 from collections.abc import Iterable
-from typing import Literal
+from typing import TYPE_CHECKING, Literal
 
-from uridx.record import ChunkInput
+if TYPE_CHECKING:
+    from uridx.record import ChunkInput
 
 Role = Literal["user", "assistant"]
 
 
-def build_turn_chunks(messages: Iterable[tuple[Role, str]]) -> list[ChunkInput]:
+def build_turn_chunks(messages: Iterable[tuple[Role, str]]) -> list["ChunkInput"]:
     """Group a (role, text) stream into one chunk per exchange. Empty texts are dropped."""
+    from uridx.record import ChunkInput
+
     turns: list[ChunkInput] = []
     user: str | None = None
     assistant: list[str] = []

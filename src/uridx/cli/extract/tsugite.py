@@ -17,8 +17,6 @@ from typing import Annotated, Optional
 
 import typer
 
-from uridx.record import Record
-
 from ._turns import Role, build_turn_chunks
 from .base import drop_indexed, output
 
@@ -71,6 +69,8 @@ def extract(
     tag: Annotated[Optional[list[str]], typer.Option("--tag", "-t", help="Additional tags")] = None,
 ):
     """Extract Tsugite chat history from its SQLite backend (history.db)."""
+    from uridx.record import Record
+
     db_path = _resolve_db(path)
     if not db_path.is_file():
         print(f"Tsugite history database not found: {db_path}", file=sys.stderr)

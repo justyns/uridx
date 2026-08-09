@@ -2,11 +2,11 @@
 
 Both readers (`maildir`, `mbox`) hand `iter_message_records` a stream of
 `(EmailMessage, folder_label)` pairs; it parses, drops/tags junk, and yields one
-Record per message. Each message is its own Item (immutable — new mail never mutates
+Record per message. Each message is its own Item (immutable: new mail never mutates
 old Items), carrying a `thread:<root-id>` tag so conversations can be searched and
-listed at retrieval time. Idempotency is left to `add_item` (content-hash upsert).
+listed at retrieval time. Idempotency is left to `ingest_record` (content-hash upsert).
 
-Not named `email.py` — that would shadow the stdlib `email` package.
+Not named `email.py`, which would shadow the stdlib `email` package.
 """
 
 import email
@@ -22,10 +22,12 @@ from email.message import EmailMessage
 from email.utils import parsedate_to_datetime
 from enum import Enum
 from html.parser import HTMLParser
+from typing import TYPE_CHECKING
 
-from uridx.chunking import split_text
 from uridx.config import URIDX_MAX_CHUNK_CHARS
-from uridx.record import ChunkInput, Record
+
+if TYPE_CHECKING:
+    from uridx.record import ChunkInput, Record
 
 # Cap chunks per message: machine-generated mail (log/report bodies) can run to
 # megabytes; index the head so the message stays findable, tag it `truncated`.
@@ -194,8 +196,11 @@ def _clean_subject(subject: str) -> str:
     return _RE_PREFIX.sub("", subject.strip()).strip()
 
 
-def _message_chunks(m: Msg) -> tuple[list[ChunkInput], bool]:
+def _message_chunks(m: Msg) -> tuple[list["ChunkInput"], bool]:
     """Chunk the message text, capped at MAX_CHUNKS; returns (chunks, truncated)."""
+    from uridx.chunking import split_text
+    from uridx.record import ChunkInput
+
     header = [f"From: {m.from_addr}"]
     if m.to:
         header.append(f"To: {m.to}")
@@ -212,7 +217,9 @@ def _message_chunks(m: Msg) -> tuple[list[ChunkInput], bool]:
     return chunks, len(pieces) > MAX_CHUNKS
 
 
-def build_message_record(m: Msg, *, account: str, junk_signals: set[str], user_tags: list[str]) -> Record:
+def build_message_record(m: Msg, *, account: str, junk_signals: set[str], user_tags: list[str]) -> "Record":
+    from uridx.record import Record
+
     title = _clean_subject(m.subject)
     junk = sorted(junk_signals)
     chunks, truncated = _message_chunks(m)
@@ -252,7 +259,7 @@ def message_record(
     junk_mode: JunkMode = JunkMode.skip,
     since: datetime | None = None,
     user_tags: list[str] | None = None,
-) -> Record | None:
+) -> "Record | None":
     """Parse and filter one message; returns its Record, or None if filtered out."""
     m = parse_message(msg, folder)
     if since and (m.date is None or m.date < since):
@@ -271,7 +278,7 @@ def iter_message_records(
     junk_mode: JunkMode = JunkMode.skip,
     since: datetime | None = None,
     user_tags: list[str] | None = None,
-) -> Iterator[Record]:
+) -> Iterator["Record"]:
     """Parse, filter junk, and yield one Record per message (streaming)."""
     for msg, folder in messages:
         rec = message_record(msg, folder, account=account, junk_mode=junk_mode, since=since, user_tags=user_tags)
