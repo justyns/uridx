@@ -239,21 +239,19 @@ def add(
         print(f"Error: {e}", file=sys.stderr)
         raise typer.Exit(2)
 
-    if dry_run:
-        for name, files in buckets.items():
-            for f in files:
-                print(f"{f}\t{name}")
-        for f in skipped:
-            print(f"{f}\t(no extractor)")
-        for f in missing:
-            print(f"{f}\t(missing)")
-        return
-
     if missing:
         print(f"Error: path does not exist: {missing[0]}", file=sys.stderr)
         for f in missing[1:]:
             print(f"       path does not exist: {f}", file=sys.stderr)
         raise typer.Exit(2)
+
+    if dry_run:
+        for name, files in buckets.items():
+            for f in drop_indexed_files(files, force):
+                print(f"{f}\t{name}")
+        for f in skipped:
+            print(f"{f}\t(no extractor)")
+        return
 
     init_db()
     heal_index()
