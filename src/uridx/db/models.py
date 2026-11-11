@@ -1,9 +1,9 @@
-from datetime import datetime
-
-from uridx.timeutil import utcnow
 from typing import Optional
 
+from pydantic import NaiveDatetime
 from sqlmodel import Field, Relationship, SQLModel
+
+from uridx.timeutil import utcnow
 
 
 class Tag(SQLModel, table=True):
@@ -18,7 +18,7 @@ class Location(SQLModel, table=True):
     item_id: int = Field(foreign_key="item.id", index=True)
     uri: str = Field(index=True)
     machine: Optional[str] = Field(default=None, index=True)
-    added_at: datetime = Field(default_factory=utcnow)
+    added_at: NaiveDatetime = Field(default_factory=utcnow)
 
     item: "Item" = Relationship(back_populates="locations")
 
@@ -30,7 +30,7 @@ class Chunk(SQLModel, table=True):
     chunk_index: Optional[int] = None
     text: str
     meta: Optional[str] = None
-    created_at: datetime = Field(default_factory=utcnow)
+    created_at: NaiveDatetime = Field(default_factory=utcnow)
 
     item: "Item" = Relationship(back_populates="chunks")
 
@@ -42,9 +42,9 @@ class Item(SQLModel, table=True):
     source_type: Optional[str] = Field(default=None, index=True)
     context: Optional[str] = None
     content_hash: Optional[str] = Field(default=None, index=True)
-    expires_at: Optional[datetime] = Field(default=None, index=True)
-    created_at: datetime = Field(default_factory=utcnow)
-    updated_at: datetime = Field(default_factory=utcnow)
+    expires_at: Optional[NaiveDatetime] = Field(default=None, index=True)
+    created_at: NaiveDatetime = Field(default_factory=utcnow)
+    updated_at: NaiveDatetime = Field(default_factory=utcnow)
 
     chunks: list[Chunk] = Relationship(back_populates="item", cascade_delete=True)
     tags: list[Tag] = Relationship(back_populates="item", cascade_delete=True)
@@ -54,4 +54,4 @@ class Item(SQLModel, table=True):
 class Setting(SQLModel, table=True):
     key: str = Field(primary_key=True)
     value: str
-    updated_at: datetime = Field(default_factory=utcnow)
+    updated_at: NaiveDatetime = Field(default_factory=utcnow)
