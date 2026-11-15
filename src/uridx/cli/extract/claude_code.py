@@ -13,7 +13,7 @@ import typer
 from uridx.timeutil import to_aware_utc
 
 from ._turns import Role, build_turn_chunks
-from .base import drop_indexed, output
+from .base import drop_indexed, get_file_mtime, output
 
 if TYPE_CHECKING:
     from uridx.record import ChunkInput
@@ -164,11 +164,17 @@ def extract(
             uri = f"claude-code://{project_hash}/{jsonl_file.stem}"
             source_uri_map[uri] = (jsonl_file, project_hash)
 
-    source_uri_map = drop_indexed(source_uri_map, force, label=lambda v: str(v[0]))
+    source_uri_map = drop_indexed(
+        source_uri_map,
+        force,
+        label=lambda v: str(v[0]),
+        version=lambda v: get_file_mtime(v[0]),
+    )
     if not source_uri_map:
         return
 
     for source_uri, (jsonl_file, project_hash) in source_uri_map.items():
+        mtime = get_file_mtime(jsonl_file)
         try:
             result = _parse_conversation(jsonl_file)
         except Exception as e:
@@ -193,5 +199,6 @@ def extract(
                 # When the conversation happened, not when it was indexed: this drives
                 # the recency boost and `search --after`, as it does for tsugite.
                 created_at=result.started_at,
+                source_hash=mtime,
             )
         )

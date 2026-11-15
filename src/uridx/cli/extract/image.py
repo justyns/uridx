@@ -12,7 +12,16 @@ import typer
 
 from uridx.config import OLLAMA_BASE_URL, normalize_ollama_url
 
-from .base import MissingExtractorDependency, file_uri, get_file_mtime, output, prepare_files
+from .base import (
+    MissingExtractorDependency,
+    NoDefaultExcludes,
+    NoGitignore,
+    file_hash,
+    file_uri,
+    get_file_mtime,
+    output,
+    prepare_files,
+)
 
 if TYPE_CHECKING:
     from uridx.record import Record
@@ -76,6 +85,7 @@ def iter_records(
                 source_type="image",
                 context=json.dumps({"path": str(img_file), "vision_model": vision_model}),
                 created_at=get_file_mtime(img_file),
+                source_hash=file_hash(img_file),
             )
 
 
@@ -85,11 +95,16 @@ def extract(
     base_url: Annotated[str, typer.Option("--base-url", help="Ollama URL")] = "",
     force: Annotated[bool, typer.Option("--force", "-f", help="Re-process all files even if already ingested")] = False,
     tag: Annotated[Optional[list[str]], typer.Option("--tag", "-t", help="Additional tags")] = None,
+    no_gitignore: NoGitignore = False,
+    no_default_excludes: NoDefaultExcludes = False,
 ):
     """Extract image descriptions via Ollama vision model."""
     try:
         for rec in iter_records(
-            prepare_files(paths or [], EXTENSIONS, force), tag=tag, model=model or None, base_url=base_url or None
+            prepare_files(paths or [], EXTENSIONS, force, no_gitignore, no_default_excludes),
+            tag=tag,
+            model=model or None,
+            base_url=base_url or None,
         ):
             output(rec)
     except MissingExtractorDependency as e:

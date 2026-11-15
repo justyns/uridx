@@ -112,6 +112,42 @@ the embedding model: unrelated text sits around 0.4-0.5 for `qwen3-embedding:0.6
 0.6 is a reasonable starting point there. Keyword-only search (`--no-semantic`) never
 embeds the query, so it reports no `rel` and ignores `--min-score`.
 
+### Contexts
+
+Attach a description to a path or URI prefix. Search results under it list every matching
+context, global first. The context text is embedded and keyword-indexed with each chunk
+under the prefix.
+
+```bash
+uridx context add ~/notes/grok-bot "Exported transcripts from the grok bot desktop app"
+uridx context add claude-code:// "Claude Code session transcripts"
+uridx context add / "Knowledge base for my projects"   # global
+uridx context list
+uridx context rm ~/notes/grok-bot
+```
+
+`add` appends to the prefix's existing context and `rm` clears it. Both reindex the items
+under the prefix. `--no-reindex` defers that to the next `uridx reindex`.
+
+### Excludes
+
+`add`, `extract` and `ingest` skip paths that an exclude rule covers.
+
+```bash
+uridx exclude add node_modules              # bare name, matched at any depth
+uridx exclude add "*.log"                   # glob
+uridx exclude add ~/notes/scratch           # path and everything under it
+uridx exclude add claude-code://abc123      # source URI prefix
+uridx exclude add ~/notes/scratch --purge   # also delete the items already indexed under it
+uridx exclude list
+uridx exclude rm ~/notes/scratch
+```
+
+Directory walks also skip what git ignores (`--no-gitignore` to index it) and a built-in list:
+`.git`, `node_modules`, `.venv`, `__pycache__`, `*.pyc`, `dist`, `build` and other tool caches
+(`--no-default-excludes` to index them). `--force` indexes a file passed on the command line
+even when a rule covers it.
+
 ### Delete
 
 ```bash

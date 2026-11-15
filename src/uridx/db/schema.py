@@ -1,7 +1,7 @@
 """The parts of the schema SQLModel does not model, and the migrations that heal them.
 
-SQLModel's `create_all` owns the plain tables (item, chunk, tag, location, setting).
-This module owns everything hand-rolled (the FTS5 virtual table and its triggers,
+SQLModel's `create_all` owns the plain tables (item, chunk, tag, location, setting,
+contexts, excludes). This module owns everything hand-rolled (the FTS5 virtual table and its delete trigger,
 and the vector tables) plus the in-place migrations that bring an older database up
 to the current shape. Every function takes a SQLAlchemy Connection and runs in that
 connection's transaction, except _migrate_vec0_table, which commits as it goes to
@@ -18,7 +18,7 @@ from sqlalchemy import Connection
 
 VEC0_MIGRATION_PAGE = 5000
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 """Bump when a migration below needs to re-run on databases that already ran the others."""
 
 
@@ -109,11 +109,12 @@ def heal_bq_drift(conn: Connection) -> None:
 
 
 def _ensure_fts_table(conn: Connection) -> None:
-    """Ensure the FTS table and its triggers exist with the current configuration.
+    """Ensure the FTS table and its delete trigger exist with the current configuration.
 
-    Recreated (and repopulated from chunk) when an older database is missing
-    contentless_delete, still carries the dropped `context` column, or has triggers
-    using the pre-contentless_delete `VALUES('delete', ...)` syntax.
+    The write path inserts the rows, indexing each chunk's text after its context chain. The
+    table is recreated (and repopulated from chunk text) when an older database is missing
+    contentless_delete, has the dropped `context` column, has triggers using the
+    pre-contentless_delete `VALUES('delete', ...)` syntax, or has the insert and update triggers.
     """
     create_sql = _sql_for(conn, "table", "chunks_fts")
     trigger_sql = _sql_for(conn, "trigger", "chunks_ad") or ""
@@ -122,6 +123,7 @@ def _ensure_fts_table(conn: Connection) -> None:
         or "context" in create_sql
         or "VALUES('delete'" in trigger_sql
         or "VALUES ('delete'" in trigger_sql
+        or _sql_for(conn, "trigger", "chunks_ai") is not None
     )
     if create_sql is not None and not stale:
         return
@@ -133,16 +135,7 @@ def _ensure_fts_table(conn: Connection) -> None:
 
     conn.exec_driver_sql("CREATE VIRTUAL TABLE chunks_fts USING fts5(text, content='', contentless_delete=1)")
     conn.exec_driver_sql(
-        "CREATE TRIGGER chunks_ai AFTER INSERT ON chunk BEGIN "
-        "INSERT INTO chunks_fts(rowid, text) VALUES (NEW.id, NEW.text); END"
-    )
-    conn.exec_driver_sql(
         "CREATE TRIGGER chunks_ad AFTER DELETE ON chunk BEGIN DELETE FROM chunks_fts WHERE rowid = OLD.id; END"
-    )
-    conn.exec_driver_sql(
-        "CREATE TRIGGER chunks_au AFTER UPDATE ON chunk BEGIN "
-        "DELETE FROM chunks_fts WHERE rowid = OLD.id; "
-        "INSERT INTO chunks_fts(rowid, text) VALUES (NEW.id, NEW.text); END"
     )
     if stale:
         conn.exec_driver_sql("INSERT INTO chunks_fts(rowid, text) SELECT id, text FROM chunk")
@@ -153,10 +146,14 @@ def _ensure_item_content_hash(conn: Connection) -> None:
 
     create_all only indexes tables it creates, so the index needs its own IF NOT EXISTS.
     """
-    columns = [row[1] for row in conn.exec_driver_sql("PRAGMA table_info(item)").fetchall()]
-    if "content_hash" not in columns:
-        conn.exec_driver_sql("ALTER TABLE item ADD COLUMN content_hash TEXT")
+    _ensure_item_column(conn, "content_hash")
     conn.exec_driver_sql("CREATE INDEX IF NOT EXISTS ix_item_content_hash ON item (content_hash)")
+
+
+def _ensure_item_column(conn: Connection, name: str) -> None:
+    columns = [row[1] for row in conn.exec_driver_sql("PRAGMA table_info(item)").fetchall()]
+    if name not in columns:
+        conn.exec_driver_sql(f"ALTER TABLE item ADD COLUMN {name} TEXT")
 
 
 def _backfill_locations(conn: Connection) -> None:
@@ -192,6 +189,7 @@ def apply_schema(conn: Connection) -> None:
         return
 
     _ensure_item_content_hash(conn)
+    _ensure_item_column(conn, "source_hash")
     _backfill_locations(conn)
     _ensure_vector_tables(conn)
     _ensure_fts_table(conn)

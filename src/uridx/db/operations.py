@@ -22,8 +22,9 @@ from sqlmodel import func, select
 
 from uridx.chunking import prepare_record
 from uridx.config import get_machine_id
-from uridx.db.engine import get_session
-from uridx.db.models import Chunk, Item, Location, Setting, Tag
+from uridx.context import GLOBAL_PREFIX, indexed_text, prefix_matches
+from uridx.db.engine import get_session, load_contexts
+from uridx.db.models import Chunk, Context, Exclude, Item, Location, Setting, Tag
 from uridx.db.schema import create_embeddings_tables
 from uridx.embeddings import (
     EmbeddingBackendError,
@@ -64,6 +65,101 @@ def _insert_chunk_embeddings(session, pairs: Iterable[tuple[int, list[float]]]) 
     conn.exec_driver_sql(
         "INSERT INTO chunk_embeddings_bq (chunk_id, embedding) VALUES (?, vec_quantize_binary(?))", rows
     )
+
+
+def _insert_chunk_fts(session, rows: Iterable[tuple[int, str]]) -> None:
+    session.connection().exec_driver_sql("INSERT INTO chunks_fts (rowid, text) VALUES (?, ?)", list(rows))
+
+
+def _reindex_chunks(session, rows: list[tuple[int, str, str]], contexts: dict[str, str]) -> None:
+    """Re-derive the vector and keyword rows of (chunk_id, source_uri, text) chunks from their context chain."""
+    ids = [chunk_id for chunk_id, _, _ in rows]
+    texts = [indexed_text(contexts, uri, text) for _, uri, text in rows]
+    embeddings = get_embeddings_sync(texts)
+    _delete_chunk_embeddings(session, ids)
+    placeholders = ",".join("?" * len(ids))
+    session.connection().exec_driver_sql(f"DELETE FROM chunks_fts WHERE rowid IN ({placeholders})", tuple(ids))
+    _insert_chunk_embeddings(session, zip(ids, embeddings))
+    _insert_chunk_fts(session, zip(ids, texts))
+
+
+def set_context(prefix: str, text: str, updated_at: datetime | None = None) -> bool:
+    """Create or replace a context. Returns True if it changed.
+
+    With `updated_at` (import), the row is replaced only when it is older.
+    """
+    with get_session() as session:
+        row = session.get(Context, prefix)
+        if row and (row.text == text or (updated_at is not None and updated_at <= row.updated_at)):
+            return False
+        session.merge(Context(prefix=prefix, text=text, updated_at=updated_at or utcnow()))
+        session.commit()
+        return True
+
+
+def remove_row(model: type[Context | Exclude], key: str) -> bool:
+    """Delete a context or exclude rule by its key. Returns False if there was none."""
+    with get_session() as session:
+        row = session.get(model, key)
+        if row:
+            session.delete(row)
+            session.commit()
+        return row is not None
+
+
+def load_excludes(session) -> list[str]:
+    return list(session.exec(select(Exclude.pattern).order_by(Exclude.pattern)))
+
+
+def add_exclude(pattern: str, updated_at: datetime | None = None) -> bool:
+    """Store an exclude rule; returns False if it already exists."""
+    with get_session() as session:
+        if session.get(Exclude, pattern):
+            return False
+        session.add(Exclude(pattern=pattern, updated_at=updated_at or utcnow()))
+        session.commit()
+        return True
+
+
+def purge_excluded(pattern: str) -> int:
+    """Delete the items an exclude rule covers; returns how many."""
+    from uridx.excludes import is_excluded
+
+    with get_session() as session:
+        items = [i for i in session.exec(select(Item)) if is_excluded(i.source_uri, [pattern])]
+        for item in items:
+            _delete_item_in_session(session, item)
+        session.commit()
+        return len(items)
+
+
+def reindex_prefix(prefix: str) -> int:
+    """Re-embed and keyword-index every item under `prefix` with its current context chain. Returns the item count."""
+    if prefix == GLOBAL_PREFIX:
+        uri_start = ""
+    elif prefix.startswith("/"):
+        uri_start = "file://" + prefix
+    else:
+        uri_start = prefix
+    with get_session() as session:
+        contexts = load_contexts(session)
+        candidates = session.exec(
+            select(Chunk.id, Item.id, Item.source_uri)
+            .join(Item, Chunk.item_id == Item.id)
+            .where(Item.source_uri.startswith(uri_start, autoescape=True))
+        ).all()
+        matches = [(chunk_id, item_id) for chunk_id, item_id, uri in candidates if prefix_matches(prefix, uri)]
+        chunk_ids = [chunk_id for chunk_id, _ in matches]
+        item_ids = {item_id for _, item_id in matches}
+        for i in range(0, len(chunk_ids), EMBED_BATCH_CHUNKS):
+            rows = session.exec(
+                select(Chunk.id, Item.source_uri, Chunk.text)
+                .join(Item, Chunk.item_id == Item.id)
+                .where(Chunk.id.in_(chunk_ids[i : i + EMBED_BATCH_CHUNKS]))
+            ).all()
+            _reindex_chunks(session, rows, contexts)
+            session.commit()
+        return len(item_ids)
 
 
 def read_chunk_embeddings(session, chunk_ids: list[int]) -> dict[int, bytes]:
@@ -155,6 +251,7 @@ def _detach_item(session, item: Item) -> Item:
 def _touch_existing(session, item: Item, record: Record, tags: list[str], incoming: datetime | None) -> Item:
     """Same URI, same content: reconcile metadata, tags and locations without re-chunking."""
     changed = _apply_locations(session, item, record)
+    item.source_hash = record.source_hash or item.source_hash
     if incoming is None:
         changed = _set_item_meta(item, record) or changed
         changed = _reconcile_tags(session, item, tags, replace=True) or changed
@@ -181,6 +278,7 @@ def _create_item(
     content_hash: str,
     incoming: datetime | None,
     embeddings: list[list[float]] | None,
+    contexts: dict[str, str],
 ) -> Item:
     """Insert the item, its chunks, tags, locations and vectors as one transaction."""
     created_at = to_naive_utc(record.created_at)
@@ -190,6 +288,7 @@ def _create_item(
         source_type=record.source_type,
         context=record.context,
         content_hash=content_hash,
+        source_hash=record.source_hash,
         created_at=created_at or utcnow(),
         updated_at=incoming or created_at or utcnow(),
     )
@@ -214,9 +313,9 @@ def _create_item(
     _apply_locations(session, item, record)
 
     if chunks:
-        if embeddings is None:
-            embeddings = get_embeddings_sync([c.text for c in chunks])
-        _insert_chunk_embeddings(session, zip((c.id for c in chunks), embeddings))
+        texts = [indexed_text(contexts, record.source_uri, c.text) for c in chunks]
+        _insert_chunk_embeddings(session, zip((c.id for c in chunks), embeddings or get_embeddings_sync(texts)))
+        _insert_chunk_fts(session, zip((c.id for c in chunks), texts))
     return item
 
 
@@ -255,7 +354,9 @@ def ingest_record(
             if twin:
                 item, status = _merge_into(session, twin, record, tags, incoming), "merged"
             else:
-                item, status = _create_item(session, record, tags, content_hash, incoming, embeddings), "added"
+                contexts = load_contexts(session)
+                item = _create_item(session, record, tags, content_hash, incoming, embeddings, contexts)
+                status = "added"
 
         session.commit()
         session.refresh(item)
@@ -279,13 +380,18 @@ class _Embedder:
     rather than pay every remaining record's retry backoff.
     """
 
-    def __init__(self) -> None:
+    def __init__(self, contexts: dict[str, str]) -> None:
+        self.contexts = contexts
         self.failures_in_a_row = 0
 
     def embed(self, to_embed: dict[str, Record]) -> tuple[dict[str, list[list[float]]], set[str]]:
         """Return (vectors by hash, hashes that failed and must be skipped)."""
+
+        def texts_of(rec: Record) -> list[str]:
+            return [indexed_text(self.contexts, rec.source_uri, c.text) for c in rec.chunks]
+
         if len(to_embed) > 1:
-            texts = [c.text for rec in to_embed.values() for c in rec.chunks]
+            texts = [t for rec in to_embed.values() for t in texts_of(rec)]
             try:
                 vectors = _split_by_record(get_embeddings_sync(texts), to_embed)
                 self.failures_in_a_row = 0
@@ -297,7 +403,7 @@ class _Embedder:
         failed: set[str] = set()
         for h, rec in to_embed.items():
             try:
-                embedded[h] = _split_by_record(get_embeddings_sync([c.text for c in rec.chunks]), {h: rec})[h]
+                embedded[h] = _split_by_record(get_embeddings_sync(texts_of(rec)), {h: rec})[h]
                 self.failures_in_a_row = 0
             except EmbeddingBackendError as e:
                 print(f"Error embedding {rec.source_uri}: {e}", file=sys.stderr)
@@ -317,6 +423,7 @@ def ingest_records(
     on_result: Callable[[Record, IngestStatus], None] | None = None,
     batch_chunks: int = EMBED_BATCH_CHUNKS,
     precomputed: Callable[[Record], list[list[float]] | None] | None = None,
+    contexts: dict[str, str] | None = None,
 ) -> IngestCounts:
     """Ingest a record stream, batching embedding calls across records.
 
@@ -329,17 +436,23 @@ def ingest_records(
     precomputed, if given, may supply ready-made vectors for a record (import
     pass-through); records it returns None for are batch-embedded as usual.
 
+    contexts, if given, is read at each flush, so the caller may add to it mid-stream.
+
     Fast path: records whose (content_hash, source_uri) already exist are counted
     "unchanged" without touching the item at all, so a re-run over an already-indexed
     source skips per-record DB work entirely. Disabled per record when extra_tags
-    are given or the record carries sync provenance (updated_at/locations), since
-    those must still merge into the existing item.
+    are given, the record carries sync provenance (updated_at/locations), or it has a
+    source_hash that differs from the stored one, since those must still merge into the
+    existing item.
 
     Records whose embeddings fail are counted "failed" and skipped; the run continues.
     """
     counts: IngestCounts = {"added": 0, "unchanged": 0, "merged": 0, "failed": 0}
     batch: list[tuple[Record, str]] = []
-    embedder = _Embedder()
+    if contexts is None:
+        with get_session() as session:
+            contexts = load_contexts(session)
+    embedder = _Embedder(contexts)
 
     def flush():
         if not batch:
@@ -347,10 +460,11 @@ def ingest_records(
         try:
             hashes = {h for _, h in batch}
             with get_session() as session:
-                known_pairs = set(
-                    session.exec(select(Item.content_hash, Item.source_uri).where(Item.content_hash.in_(hashes))).all()
-                )
-            known = {h for h, _ in known_pairs}
+                known_rows = session.exec(
+                    select(Item.content_hash, Item.source_uri, Item.source_hash).where(Item.content_hash.in_(hashes))
+                ).all()
+            source_hashes = {(h, uri): sh for h, uri, sh in known_rows}
+            known = {h for h, _, _ in known_rows}
             to_embed = {h: rec for rec, h in batch if h not in known}  # one representative per unique new hash
             embeddings_by_hash = {}
             if precomputed:
@@ -363,7 +477,8 @@ def ingest_records(
                     counts["failed"] += 1
                     continue
                 skippable = not extra_tags and rec.updated_at is None and rec.locations is None
-                if skippable and (h, rec.source_uri) in known_pairs:
+                key = (h, rec.source_uri)
+                if skippable and key in source_hashes and rec.source_hash in (None, source_hashes[key]):
                     status = "unchanged"
                 else:
                     _, status = ingest_record(
@@ -440,7 +555,8 @@ def reindex_embeddings(batch_size: int = EMBED_BATCH_CHUNKS, on_progress=None) -
 
     Drops and recreates the vector table at the backend's dimension (updating the
     embed_dimension and embed_model settings), so this is how you switch models.
-    Items, chunks, tags, and FTS are untouched. Returns the number of chunks re-embedded.
+    Chunks are embedded and keyword-indexed with their context chain. Items, chunks and tags
+    are untouched. Returns the number of chunks re-embedded.
     """
     dim = get_dimension()
     with get_session() as session:
@@ -452,17 +568,21 @@ def reindex_embeddings(batch_size: int = EMBED_BATCH_CHUNKS, on_progress=None) -
         session.merge(Setting(key="embed_model", value=get_model_id()))
         session.commit()
 
+        contexts = load_contexts(session)
         total = session.exec(select(func.count(Chunk.id))).one()
         done = 0
         last_id = 0
         while True:
             rows = session.exec(
-                select(Chunk.id, Chunk.text).where(Chunk.id > last_id).order_by(Chunk.id).limit(batch_size)
+                select(Chunk.id, Item.source_uri, Chunk.text)
+                .join(Item, Chunk.item_id == Item.id)
+                .where(Chunk.id > last_id)
+                .order_by(Chunk.id)
+                .limit(batch_size)
             ).all()
             if not rows:
                 break
-            embeddings = get_embeddings_sync([text for _, text in rows])
-            _insert_chunk_embeddings(session, zip((chunk_id for chunk_id, _ in rows), embeddings))
+            _reindex_chunks(session, rows, contexts)
             session.commit()
             last_id = rows[-1][0]
             done += len(rows)
@@ -491,10 +611,7 @@ def get_stats() -> dict:
         }
 
 
-def get_existing_source_uris(uris: list[str]) -> set[str]:
-    """Return which source_uris already exist in the local DB."""
-    if not uris:
-        return set()
+def get_source_hashes(uris: list[str]) -> dict[str, str | None]:
+    """Map each already-indexed source_uri to its stored source_hash (None if never recorded)."""
     with get_session() as session:
-        existing = session.exec(select(Item.source_uri).where(Item.source_uri.in_(uris))).all()
-        return set(existing)
+        return dict(session.exec(select(Item.source_uri, Item.source_hash).where(Item.source_uri.in_(uris))).all())

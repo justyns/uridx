@@ -12,10 +12,10 @@ from functools import lru_cache
 from pathlib import Path
 
 from sqlalchemy import event
-from sqlmodel import Session, SQLModel, create_engine
+from sqlmodel import Session, SQLModel, create_engine, select
 
 from uridx.config import URIDX_DB_PATH
-from uridx.db.models import Setting
+from uridx.db.models import Context, Setting
 from uridx.db.schema import apply_schema, heal_bq_drift
 from uridx.embeddings import EmbeddingBackendError, get_dimension, get_model_id
 
@@ -63,6 +63,10 @@ def get_setting(key: str) -> str | None:
     with get_session() as session:
         setting = session.get(Setting, key)
         return setting.value if setting else None
+
+
+def load_contexts(session) -> dict[str, str]:
+    return {c.prefix: c.text for c in session.exec(select(Context))}
 
 
 def require_embed_model_match():

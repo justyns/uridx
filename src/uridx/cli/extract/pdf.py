@@ -8,7 +8,15 @@ from typing import TYPE_CHECKING, Annotated, Optional
 
 import typer
 
-from .base import MissingExtractorDependency, file_uri, output, prepare_files
+from .base import (
+    MissingExtractorDependency,
+    NoDefaultExcludes,
+    NoGitignore,
+    file_hash,
+    file_uri,
+    output,
+    prepare_files,
+)
 
 if TYPE_CHECKING:
     from uridx.record import Record
@@ -51,6 +59,7 @@ def iter_records(files: list[Path], *, tag: Optional[list[str]] = None) -> Itera
             title=pdf_file.stem,
             source_type="pdf",
             context=json.dumps({"path": str(pdf_file), "pages": len(chunks)}),
+            source_hash=file_hash(pdf_file),
         )
 
 
@@ -58,10 +67,14 @@ def extract(
     paths: Annotated[Optional[list[Path]], typer.Argument(help="Files or directories")] = None,
     force: Annotated[bool, typer.Option("--force", "-f", help="Re-process all files even if already ingested")] = False,
     tag: Annotated[Optional[list[str]], typer.Option("--tag", "-t", help="Additional tags")] = None,
+    no_gitignore: NoGitignore = False,
+    no_default_excludes: NoDefaultExcludes = False,
 ):
     """Extract PDF files by page (requires pdfplumber)."""
     try:
-        for rec in iter_records(prepare_files(paths or [], EXTENSIONS, force), tag=tag):
+        for rec in iter_records(
+            prepare_files(paths or [], EXTENSIONS, force, no_gitignore, no_default_excludes), tag=tag
+        ):
             output(rec)
     except MissingExtractorDependency as e:
         print(str(e), file=sys.stderr)

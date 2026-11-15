@@ -15,6 +15,7 @@ from typing import TYPE_CHECKING, Annotated, Optional
 import typer
 
 from uridx.cli.extract import app as extract_app
+from uridx.cli.extract.base import NoDefaultExcludes, NoGitignore, load_rules
 
 if TYPE_CHECKING:
     from rich.console import Console
@@ -22,6 +23,10 @@ if TYPE_CHECKING:
 
 app = typer.Typer(pretty_exceptions_enable=False)
 app.add_typer(extract_app, name="extract")
+context_app = typer.Typer(help="Attach descriptions to paths and URI prefixes")
+app.add_typer(context_app, name="context")
+exclude_app = typer.Typer(help="Paths and globs that add, extract and ingest skip")
+app.add_typer(exclude_app, name="exclude")
 
 SNIPPET_LIMIT = 400
 
@@ -69,7 +74,7 @@ def _emit_summary(summary: dict, failed: int) -> None:
         raise typer.Exit(1)
 
 
-def _run_record_stream(run, verb: str, out_key: str):
+def _run_record_stream(run, verb: str, out_key: str, *, allow_sync_lines: bool = False):
     """Feed stdin JSONL records through run(records, on_result) with progress; print summary counts."""
     from uridx.record import RecordError, iter_jsonl_records
 
@@ -78,15 +83,14 @@ def _run_record_stream(run, verb: str, out_key: str):
         with _progress(console) as progress:
             task = progress.add_task(f"{verb}...", total=None)
             counts = run(
-                iter_jsonl_records(sys.stdin),
+                iter_jsonl_records(sys.stdin, allow_sync_lines=allow_sync_lines),
                 lambda rec, _: progress.update(task, description=rec.source_uri[:60], advance=1),
             )
     except RecordError as e:
         print(f"Error: {e}", file=sys.stderr)
         raise typer.Exit(1)
-    _emit_summary(
-        {out_key: counts["added"], "unchanged": counts["unchanged"], "merged": counts["merged"]}, counts["failed"]
-    )
+    summary = {out_key: counts["added"], "unchanged": counts["unchanged"], "merged": counts["merged"]}
+    _emit_summary(summary, counts["failed"])
 
 
 @app.command()
@@ -146,6 +150,8 @@ def search(
                 print(f"  Type: {r.source_type}")
             if r.tags:
                 print(f"  Tags: {', '.join(r.tags)}")
+            for c in r.contexts:
+                print(f"  Context ({c['prefix']}): {c['text']}")
             print(_indent(r.chunk_text) if full else f"  {_snippet(r.chunk_text)}")
             print()
 
@@ -180,11 +186,13 @@ def ingest(
 
     from uridx.db.engine import heal_index, init_db, require_embed_model_match
     from uridx.db.operations import ingest_record, ingest_records
+    from uridx.excludes import is_excluded
     from uridx.record import ChunkInput, Record
 
     init_db()
     heal_index()
     require_embed_model_match()
+    rules = load_rules(defaults=False)
 
     if text is None and uri is not None:
         text = sys.stdin.read()
@@ -194,12 +202,17 @@ def ingest(
 
     if text is not None:
         source_uri = uri or f"text://{hashlib.sha256(text.encode()).hexdigest()[:16]}"
+        if is_excluded(source_uri, rules):
+            print(f"Skipping {source_uri} (excluded)", file=sys.stderr)
+            return
         with _console().status(f"Ingesting {source_uri}..."):
             item, _ = ingest_record(Record(source_uri=source_uri, chunks=[ChunkInput(text=text)], tags=tag or []))
         print(json.dumps({"source_uri": item.source_uri, "chunks": len(item.chunks)}))
     else:
         _run_record_stream(
-            lambda records, on_result: ingest_records(records, extra_tags=tag, on_result=on_result),
+            lambda records, on_result: ingest_records(
+                (r for r in records if not is_excluded(r.source_uri, rules)), extra_tags=tag, on_result=on_result
+            ),
             "Ingesting",
             "ingested",
         )
@@ -214,10 +227,14 @@ def add(
     force: Annotated[bool, typer.Option("--force", "-f", help="Re-ingest even if already indexed")] = False,
     tag: Annotated[Optional[list[str]], typer.Option("--tag", "-t", help="Tags to add to ingested items")] = None,
     dry_run: Annotated[bool, typer.Option("--dry-run", help="Show what would be ingested without doing it")] = False,
+    no_gitignore: NoGitignore = False,
+    no_default_excludes: NoDefaultExcludes = False,
 ):
     """Add files or directories, auto-detecting the extractor by file extension.
 
     Porcelain over `extract | ingest`. Already-indexed files are skipped unless --force.
+    Directory walks skip stored exclude rules, files git ignores and the built-in excludes.
+    --force indexes a file passed on the command line even when a rule covers it.
     Structured sources (Claude Code / Tsugite) are not auto-detected; use `extract`.
     """
     from uridx.cli.extract.base import MissingExtractorDependency, drop_indexed_files
@@ -233,8 +250,9 @@ def add(
         )
         raise typer.Exit(2)
 
+    rules = load_rules(not no_default_excludes)
     try:
-        buckets, skipped, missing = resolve_dispatch(paths, extractor)
+        buckets, skipped, missing = resolve_dispatch(paths, rules, extractor, force=force, gitignore=not no_gitignore)
     except ValueError as e:
         print(f"Error: {e}", file=sys.stderr)
         raise typer.Exit(2)
@@ -308,7 +326,7 @@ def export(
     source_type: Annotated[Optional[str], typer.Option("--type", help="Filter by source type")] = None,
     with_embeddings: Annotated[bool, typer.Option("--with-embeddings/--no-embeddings")] = True,
 ):
-    """Export the index as JSONL for import on another machine.
+    """Export the index, its contexts and its exclude rules as JSONL for import on another machine.
 
     Streams the indexed text-representation (chunks, tags, locations, optional
     embeddings), not the original source files. Pipe to `uridx import`:
@@ -336,9 +354,9 @@ def export(
 def import_():
     """Import an export stream (JSONL on stdin) into the local index.
 
-    Idempotent: identical content merges by hash, origin machines and timestamps
-    are preserved, and embeddings are reused when the model matches (otherwise
-    recomputed locally from chunk text).
+    Idempotent. Identical content merges by hash, and origin machines and timestamps are
+    preserved. Contexts and exclude rules in the stream are applied. Embeddings are reused
+    when the model matches and no context covers the item, and recomputed locally otherwise.
     """
     from uridx.db.engine import heal_index, init_db, require_embed_model_match
     from uridx.sync import import_records
@@ -346,7 +364,123 @@ def import_():
     init_db()
     heal_index()
     require_embed_model_match()
-    _run_record_stream(import_records, "Importing", "imported")
+    _run_record_stream(import_records, "Importing", "imported", allow_sync_lines=True)
+
+
+def _reindex_context(prefix: str, no_reindex: bool) -> None:
+    if no_reindex:
+        print(json.dumps({"prefix": prefix, "deferred": True}))
+        return
+    from uridx.db.engine import heal_index, require_embed_model_match
+    from uridx.db.operations import reindex_prefix
+
+    heal_index()
+    require_embed_model_match()
+    with _console().status(f"Reindexing items under {prefix}..."):
+        count = reindex_prefix(prefix)
+    print(json.dumps({"prefix": prefix, "reindexed": count}))
+
+
+NoReindex = Annotated[bool, typer.Option("--no-reindex", help="Defer reindexing to the next `uridx reindex`")]
+
+
+@context_app.command("add")
+def context_add(
+    prefix: Annotated[str, typer.Argument(help="Path, source URI prefix (e.g. claude-code://), or / for everything")],
+    text: Annotated[str, typer.Argument(help="Description returned with matching search results")],
+    no_reindex: NoReindex = False,
+):
+    """Append to the context for a path or URI prefix, and reindex the items under it."""
+    from uridx.context import normalize_prefix
+    from uridx.db.engine import get_session, init_db
+    from uridx.db.models import Context
+    from uridx.db.operations import set_context
+
+    prefix = normalize_prefix(prefix)
+    init_db()
+    with get_session() as session:
+        existing = session.get(Context, prefix)
+    set_context(prefix, f"{existing.text}\n{text}" if existing else text)
+    _reindex_context(prefix, no_reindex)
+
+
+@context_app.command("rm")
+def context_rm(
+    prefix: Annotated[str, typer.Argument(help="Path or URI prefix of the context to remove")],
+    no_reindex: NoReindex = False,
+):
+    """Remove a context and reindex the items under it."""
+    from uridx.context import normalize_prefix
+    from uridx.db.engine import init_db
+    from uridx.db.models import Context
+    from uridx.db.operations import remove_row
+
+    prefix = normalize_prefix(prefix)
+    init_db()
+    if not remove_row(Context, prefix):
+        print(f"Error: no context for {prefix}", file=sys.stderr)
+        raise typer.Exit(1)
+    _reindex_context(prefix, no_reindex)
+
+
+@context_app.command("list")
+def context_list():
+    """List contexts, global first."""
+    from uridx.db.engine import get_session, init_db, load_contexts
+
+    init_db()
+    with get_session() as session:
+        contexts = load_contexts(session)
+    for prefix in sorted(contexts, key=len):
+        print(f"{prefix}\t{contexts[prefix]}")
+
+
+@exclude_app.command("add")
+def exclude_add(
+    pattern: Annotated[
+        str,
+        typer.Argument(help="Path, source URI prefix, glob, or bare name such as node_modules (matched at any depth)"),
+    ],
+    purge: Annotated[bool, typer.Option("--purge", help="Also delete the indexed items it covers")] = False,
+):
+    """Skip a path or glob in add, extract and ingest. Indexed items stay unless --purge."""
+    from uridx.db.engine import init_db
+    from uridx.db.operations import add_exclude, purge_excluded
+    from uridx.excludes import normalize_exclude
+
+    pattern = normalize_exclude(pattern)
+    init_db()
+    result = {"pattern": pattern, "added": add_exclude(pattern)}
+    if purge:
+        result["purged"] = purge_excluded(pattern)
+    print(json.dumps(result))
+
+
+@exclude_app.command("rm")
+def exclude_rm(pattern: Annotated[str, typer.Argument(help="Path or glob of the rule to remove")]):
+    """Remove an exclude rule."""
+    from uridx.db.engine import init_db
+    from uridx.db.models import Exclude
+    from uridx.db.operations import remove_row
+    from uridx.excludes import normalize_exclude
+
+    pattern = normalize_exclude(pattern)
+    init_db()
+    if not remove_row(Exclude, pattern):
+        print(f"Error: no exclude rule for {pattern}", file=sys.stderr)
+        raise typer.Exit(1)
+
+
+@exclude_app.command("list")
+def exclude_list():
+    """List exclude rules."""
+    from uridx.db.engine import get_session, init_db
+    from uridx.db.operations import load_excludes
+
+    init_db()
+    with get_session() as session:
+        for pattern in load_excludes(session):
+            print(pattern)
 
 
 @app.command()
@@ -400,11 +534,11 @@ def stats():
 
 @app.command()
 def reindex():
-    """Re-embed all chunks with the current embedding backend/model.
+    """Re-embed and keyword-index all chunks with the current embedding model and contexts.
 
-    Rebuilds only the vector table (at the new model's dimension) from chunk text
-    already in the DB, so no re-extraction is needed. Use after changing URIDX_EMBEDDINGS,
-    FASTEMBED_MODEL, or OLLAMA_EMBED_MODEL.
+    Rebuilds the vector table (at the new model's dimension) and the keyword index from chunk
+    text already in the DB, so no re-extraction is needed. Use after changing URIDX_EMBEDDINGS,
+    FASTEMBED_MODEL, or OLLAMA_EMBED_MODEL, or after `context add|rm --no-reindex`.
     """
     from uridx.db.engine import init_db
     from uridx.db.operations import reindex_embeddings

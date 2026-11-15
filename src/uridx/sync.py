@@ -3,7 +3,9 @@
 An export line is a Record plus provenance (timestamps, content_hash, locations,
 optional embeddings), so import reuses the ingest machinery: content-hash upsert
 dedups across machines, and preserved updated_at values keep re-imports from
-marking items dirty (no sync echo).
+marking items dirty (no sync echo). Contexts and exclude rules come first, as
+ContextRecord and ExcludeRecord lines. Vectors embed the item's context chain, so export
+omits them for items with a matching context.
 """
 
 import base64
@@ -15,11 +17,21 @@ from datetime import datetime
 from sqlalchemy.orm import selectinload
 from sqlmodel import select
 
-from uridx.db.engine import get_session, get_setting
-from uridx.db.models import Item
-from uridx.db.operations import IngestCounts, IngestStatus, ingest_records, read_chunk_embeddings
+from uridx.context import context_chain
+from uridx.db.engine import get_session, get_setting, load_contexts
+from uridx.db.models import Context, Exclude, Item
+from uridx.db.operations import (
+    IngestCounts,
+    IngestStatus,
+    add_exclude,
+    ingest_records,
+    read_chunk_embeddings,
+    reindex_prefix,
+    set_context,
+)
 from uridx.embeddings import deserialize_embedding
-from uridx.record import ChunkInput, LocationInput, Record, RecordError
+from uridx.record import ChunkInput, ContextRecord, ExcludeRecord, LocationInput, Record, RecordError
+from uridx.timeutil import to_naive_utc
 
 EXPORT_PAGE_ITEMS = 100
 
@@ -35,8 +47,10 @@ def iter_export_records(
     source_prefix: str | None = None,
     source_type: str | None = None,
     with_embeddings: bool = True,
-) -> Iterator[Record]:
-    """Yield every matching item as a Record. `since` is inclusive (>=).
+) -> Iterator[Record | ContextRecord | ExcludeRecord]:
+    """Yield the contexts and exclude rules, then every matching item as a Record. `since` is inclusive (>=).
+
+    Contexts and excludes ignore the prefix and type filters.
 
     Embeddings are read back from the vector table and stamped with the model
     recorded in settings (not the env), so export stays correct mid-migration.
@@ -51,6 +65,23 @@ def iter_export_records(
     if source_type:
         filters.append(Item.source_type == source_type)
 
+    with get_session() as session:
+        stmt = select(Context)
+        if since is not None:
+            stmt = stmt.where(Context.updated_at >= since)
+        header_lines = [
+            ContextRecord(context_prefix=c.prefix, text=c.text, updated_at=c.updated_at.isoformat())
+            for c in session.exec(stmt)
+        ]
+        stmt = select(Exclude)
+        if since is not None:
+            stmt = stmt.where(Exclude.updated_at >= since)
+        header_lines += [
+            ExcludeRecord(exclude_pattern=e.pattern, updated_at=e.updated_at.isoformat()) for e in session.exec(stmt)
+        ]
+        contexts = load_contexts(session)
+    yield from header_lines
+
     last_id = 0
     while True:
         with get_session() as session:
@@ -64,9 +95,8 @@ def iter_export_records(
             if not items:
                 return
             last_id = items[-1].id
-            blobs = (
-                read_chunk_embeddings(session, [c.id for item in items for c in item.chunks]) if with_embeddings else {}
-            )
+            plain = [i for i in items if not context_chain(contexts, i.source_uri)] if with_embeddings else []
+            blobs = read_chunk_embeddings(session, [c.id for item in plain for c in item.chunks])
             page = [_export_record(item, blobs, embed_model, embed_dim) for item in items]
         yield from page
 
@@ -91,6 +121,7 @@ def _export_record(item: Item, blobs: dict[int, bytes], embed_model: str | None,
         tags=[t.tag for t in item.tags],
         created_at=item.created_at.isoformat(),
         updated_at=item.updated_at.isoformat(),
+        source_hash=item.source_hash,
         content_hash=item.content_hash,
         locations=[LocationInput(uri=loc.uri, machine=loc.machine) for loc in item.locations] or None,
         chunks=chunks,
@@ -99,12 +130,16 @@ def _export_record(item: Item, blobs: dict[int, bytes], embed_model: str | None,
     )
 
 
-def _decode_embeddings(record: Record, model_id: str | None, dim: int | None) -> list[list[float]] | None:
-    """Decode a record's embeddings iff they match the local model; None means recompute.
+def _decode_embeddings(
+    record: Record, model_id: str | None, dim: int | None, contexts: dict[str, str]
+) -> list[list[float]] | None:
+    """Decode a record's embeddings iff they match the local model and no local context covers it. None means recompute.
 
     A blob that won't decode means a corrupt export stream, not a reason to re-embed.
     """
     if not model_id or not dim or record.embed_model != model_id or record.embed_dim != dim:
+        return None
+    if context_chain(contexts, record.source_uri):
         return None
     if not record.chunks or any(c.embedding is None for c in record.chunks):
         return None
@@ -115,9 +150,31 @@ def _decode_embeddings(record: Record, model_id: str | None, dim: int | None) ->
 
 
 def import_records(
-    records: Iterable[Record],
+    records: Iterable[Record | ContextRecord | ExcludeRecord],
     on_result: Callable[[Record, IngestStatus], None] | None = None,
 ) -> IngestCounts:
-    """Ingest an export stream, passing embeddings through when the model matches."""
+    """Ingest an export stream, passing embeddings through when the model matches.
+
+    Contexts apply as they arrive, reindexing the items already under them.
+    """
     model_id, dim = _embed_settings()
-    return ingest_records(records, on_result=on_result, precomputed=lambda r: _decode_embeddings(r, model_id, dim))
+    with get_session() as session:
+        contexts = load_contexts(session)
+
+    def items_only() -> Iterator[Record]:
+        for r in records:
+            if isinstance(r, ExcludeRecord):
+                add_exclude(r.exclude_pattern, to_naive_utc(r.updated_at))
+            elif isinstance(r, ContextRecord):
+                if set_context(r.context_prefix, r.text, to_naive_utc(r.updated_at)):
+                    contexts[r.context_prefix] = r.text
+                    reindex_prefix(r.context_prefix)
+            else:
+                yield r
+
+    return ingest_records(
+        items_only(),
+        on_result=on_result,
+        precomputed=lambda r: _decode_embeddings(r, model_id, dim, contexts),
+        contexts=contexts,
+    )

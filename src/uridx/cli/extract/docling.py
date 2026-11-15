@@ -9,7 +9,17 @@ from urllib.parse import urlparse
 
 import typer
 
-from .base import MissingExtractorDependency, drop_indexed, file_uri, get_file_mtime, output, resolve_paths
+from .base import (
+    MissingExtractorDependency,
+    NoDefaultExcludes,
+    NoGitignore,
+    drop_indexed,
+    file_hash,
+    file_uri,
+    get_file_mtime,
+    output,
+    prepare_files,
+)
 
 if TYPE_CHECKING:
     from uridx.record import Record
@@ -53,12 +63,14 @@ def iter_records(sources: list[Union[str, Path]], *, tag: Optional[list[str]] = 
 
     for source in sources:
         if isinstance(source, str) and source.startswith(("http://", "https://")):
-            source_uri, convert_arg, created_at = source, source, None
+            source_uri, convert_arg, created_at, source_hash = source, source, None, None
         else:
             path = Path(source)
             source_uri, convert_arg, created_at = file_uri(path), str(path), get_file_mtime(path)
+            source_hash = file_hash(path)
         record = _build_record(converter, chunker, convert_arg, source_uri, created_at, extra_tags)
         if record:
+            record.source_hash = source_hash
             yield record
 
 
@@ -66,19 +78,17 @@ def extract(
     sources: Annotated[Optional[list[str]], typer.Argument(help="Files, directories, or URLs")] = None,
     force: Annotated[bool, typer.Option("--force", "-f", help="Re-process all files even if already ingested")] = False,
     tag: Annotated[Optional[list[str]], typer.Option("--tag", "-t", help="Additional tags")] = None,
+    no_gitignore: NoGitignore = False,
+    no_default_excludes: NoDefaultExcludes = False,
 ):
     """Extract documents using docling (requires docling)."""
     sources = sources or []
     urls: list[Union[str, Path]] = [s for s in sources if s.startswith(("http://", "https://"))]
     local_paths = [Path(s) for s in sources if not s.startswith(("http://", "https://"))]
 
-    # Filter already-ingested by URI (URLs keyed as-is, files as file://). Keep surviving sources.
-    uri_map: dict[str, Union[str, Path]] = {url: url for url in urls}
-    for file_path in resolve_paths(local_paths, EXTENSIONS):
-        uri_map[file_uri(file_path)] = file_path
-    uri_map = drop_indexed(uri_map, force)
-
-    survivors = list(uri_map.values())
+    # URLs are filtered by URI, files by content hash.
+    survivors: list[Union[str, Path]] = list(drop_indexed({url: url for url in urls}, force).values())
+    survivors += prepare_files(local_paths, EXTENSIONS, force, no_gitignore, no_default_excludes)
     if not survivors:
         return
 

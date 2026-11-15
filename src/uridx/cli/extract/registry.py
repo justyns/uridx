@@ -38,16 +38,19 @@ def default_by_ext() -> dict[str, str]:
 
 
 def resolve_dispatch(
-    paths: list[str], extractor: Optional[str] = None
+    paths: list[str], rules: list[str], extractor: Optional[str] = None, *, force: bool = False, gitignore: bool = True
 ) -> tuple[dict[str, list[Path]], list[Path], list[Path]]:
     """Bucket input paths by which extractor handles them.
 
     Returns (buckets, skipped, missing): buckets maps extractor_name -> [Path, ...] (dedup
     by resolved path); skipped lists existing files with no matching extractor; missing
-    lists paths that don't exist at all. Directories are walked recursively. With
-    `extractor` set, only files matching that extractor's extensions are taken.
+    lists paths that don't exist at all. Directories are walked recursively, dropping what
+    `rules` cover and, with `gitignore`, what git ignores. `force` lets a named file through
+    `rules`. With `extractor` set, only files matching that extractor's extensions are taken.
     Raises ValueError for an unknown extractor name.
     """
+    from uridx.excludes import is_excluded, iter_files
+
     exts = supported_extensions(extractor) if extractor else None
     by_ext = default_by_ext()
     buckets: dict[str, list[Path]] = {}
@@ -67,11 +70,11 @@ def resolve_dispatch(
     for p in paths:
         path = Path(p)
         if path.is_dir():
-            for f in sorted(path.rglob("*")):
-                if f.is_file():
-                    classify(f)
+            for f in iter_files(path, rules, gitignore=gitignore):
+                classify(f)
         elif path.exists():
-            classify(path)
+            if force or not is_excluded(str(path.resolve()), rules):
+                classify(path)
         else:
             missing.append(path)
 

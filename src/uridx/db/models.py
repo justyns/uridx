@@ -42,6 +42,7 @@ class Item(SQLModel, table=True):
     source_type: Optional[str] = Field(default=None, index=True)
     context: Optional[str] = None
     content_hash: Optional[str] = Field(default=None, index=True)
+    source_hash: Optional[str] = None
     expires_at: Optional[NaiveDatetime] = Field(default=None, index=True)
     created_at: NaiveDatetime = Field(default_factory=utcnow)
     updated_at: NaiveDatetime = Field(default_factory=utcnow)
@@ -54,4 +55,19 @@ class Item(SQLModel, table=True):
 class Setting(SQLModel, table=True):
     key: str = Field(primary_key=True)
     value: str
+    updated_at: NaiveDatetime = Field(default_factory=utcnow)
+
+
+class Context(SQLModel, table=True):
+    __tablename__ = "contexts"
+
+    prefix: str = Field(primary_key=True)
+    text: str
+    updated_at: NaiveDatetime = Field(default_factory=utcnow)
+
+
+class Exclude(SQLModel, table=True):
+    __tablename__ = "excludes"
+
+    pattern: str = Field(primary_key=True)
     updated_at: NaiveDatetime = Field(default_factory=utcnow)

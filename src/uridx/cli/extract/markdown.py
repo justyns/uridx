@@ -9,7 +9,7 @@ from typing import TYPE_CHECKING, Annotated, Optional
 
 import typer
 
-from .base import file_uri, get_file_mtime, output, prepare_files
+from .base import NoDefaultExcludes, NoGitignore, file_hash, file_uri, get_file_mtime, output, prepare_files
 
 if TYPE_CHECKING:
     from uridx.record import Record
@@ -131,6 +131,7 @@ def iter_records(files: list[Path], *, tag: Optional[list[str]] = None) -> Itera
             source_type="markdown",
             context=json.dumps({"path": str(md_file)}),
             created_at=get_file_mtime(md_file),
+            source_hash=file_hash(md_file),
         )
 
 
@@ -140,13 +141,17 @@ def extract(
     tag: Annotated[Optional[list[str]], typer.Option("--tag", "-t", help="Additional tags")] = None,
     uri: Annotated[Optional[str], typer.Option("--uri", help="Read one document from stdin as this source URI")] = None,
     title: Annotated[Optional[str], typer.Option("--title", help="Title for stdin input")] = None,
+    no_gitignore: NoGitignore = False,
+    no_default_excludes: NoDefaultExcludes = False,
 ):
     """Extract markdown files, splitting by headings."""
     if uri is None:
         if title:
             print("Error: --title needs --uri.", file=sys.stderr)
             raise typer.Exit(2)
-        for rec in iter_records(prepare_files(paths or [], EXTENSIONS, force), tag=tag):
+        for rec in iter_records(
+            prepare_files(paths or [], EXTENSIONS, force, no_gitignore, no_default_excludes), tag=tag
+        ):
             output(rec)
         return
 

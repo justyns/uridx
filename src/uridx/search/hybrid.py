@@ -4,7 +4,8 @@ from datetime import datetime, timezone
 from sqlmodel import select
 
 from uridx.config import URIDX_MIN_SCORE, URIDX_RESCORE_K
-from uridx.db.engine import get_session
+from uridx.context import context_chain
+from uridx.db.engine import get_session, load_contexts
 from uridx.db.models import Chunk, Item, Tag
 from uridx.embeddings import get_embeddings_sync, serialize_embedding
 from uridx.record import TITLE_CHUNK_KEY
@@ -18,15 +19,10 @@ class SearchResult:
     source_type: str | None
     chunk_text: str
     score: float
-    """Rank within this result set, in (0, 1]. Relative: the best hit always scores 1.0,
-    however good or bad it is. Use it to order results, never to judge them.
-    0.0 for the unranked empty-query listing, which orders by date instead."""
     tags: list[str] = field(default_factory=list)
+    contexts: list[dict[str, str]] = field(default_factory=list)
     created_at: datetime | None = None
     relevance: float | None = None
-    """Cosine similarity to the query, in [-1, 1]. Absolute and comparable across
-    searches, which is what --min-score thresholds. None for keyword-only search,
-    which never embeds the query."""
 
 
 def _rrf(result_lists: list[list[tuple[int, float]]], k: int = 60) -> list[tuple[int, float]]:
@@ -112,6 +108,7 @@ def _list_results(
         stmt = stmt.order_by(Item.created_at.desc()).limit(limit)
         rows = session.exec(stmt).all()
         tags_by_item = _load_tags(session, {item.id for _, item in rows})
+        contexts = load_contexts(session)
 
         return [
             SearchResult(
@@ -121,6 +118,7 @@ def _list_results(
                 chunk_text=chunk.text,
                 score=0.0,
                 tags=tags_by_item.get(item.id, []),
+                contexts=context_chain(contexts, item.source_uri),
                 created_at=item.created_at,
             )
             for chunk, item in rows
@@ -161,8 +159,8 @@ def _vector_search(conn, embedding_blob: bytes, limit: int) -> list[tuple[int, f
 def _relevance_by_chunk(conn, embedding_blob: bytes, chunk_ids: list[int]) -> dict[int, float]:
     """Cosine similarity of each chunk to the query, in [-1, 1].
 
-    Computed for every ranked chunk, not just the ones the vector pass surfaced, so a
-    result that arrived via BM25 alone still gets an honest relevance number.
+    Computed for every ranked chunk, so a result that arrived via BM25 alone still gets a
+    relevance number.
     """
     if not chunk_ids:
         return {}
@@ -248,6 +246,7 @@ def hybrid_search(
 
         results_data = session.exec(stmt).all()
         tags_by_item = _load_tags(session, {item.id for _, item in results_data})
+        contexts = load_contexts(session)
         relevance = _relevance_by_chunk(conn, query_blob, chunk_ids) if semantic else {}
 
         results = [
@@ -258,6 +257,7 @@ def hybrid_search(
                 chunk_text=chunk.text,
                 score=score_map.get(chunk.id, 0.0),
                 tags=tags_by_item.get(item.id, []),
+                contexts=context_chain(contexts, item.source_uri),
                 created_at=item.created_at,
                 relevance=relevance.get(chunk.id),
             )

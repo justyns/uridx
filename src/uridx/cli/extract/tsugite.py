@@ -63,7 +63,7 @@ def extract(
     agent: Annotated[Optional[str], typer.Option("--agent", "-a", help="Filter by agent name")] = None,
     since: Annotated[
         Optional[datetime],
-        typer.Option("--since", "-s", formats=["%Y-%m-%d"], help="Only sessions created on/after this date"),
+        typer.Option("--since", "-s", formats=["%Y-%m-%d"], help="Only sessions with activity on/after this date"),
     ] = None,
     force: Annotated[bool, typer.Option("--force", "-f", help="Re-process all sessions")] = False,
     tag: Annotated[Optional[list[str]], typer.Option("--tag", "-t", help="Additional tags")] = None,
@@ -78,16 +78,18 @@ def extract(
 
     conn = _connect_ro(db_path)
 
+    last_active = "COALESCE(last_event_ts, ended_at, created_at)"
     clauses, params = [], []
     if agent:
         clauses.append("agent = ?")
         params.append(agent)
     if since:
-        clauses.append("created_at >= ?")  # created_at is ISO-8601 UTC, so string compare is chronological
+        clauses.append(f"{last_active} >= ?")  # ISO-8601 UTC, so string compare is chronological
         params.append(since.strftime("%Y-%m-%d"))
     where = (" WHERE " + " AND ".join(clauses)) if clauses else ""
     sessions = conn.execute(
-        f"SELECT session_id, agent, model, workspace, created_at, ended_at, status FROM sessions{where} "
+        f"SELECT session_id, agent, model, workspace, created_at, ended_at, status, {last_active} AS last_active "
+        f"FROM sessions{where} "
         "ORDER BY created_at DESC",
         params,
     ).fetchall()
@@ -95,7 +97,9 @@ def extract(
     source_uri_map: dict[str, sqlite3.Row] = {}
     for s in sessions:
         source_uri_map[f"tsugite://{s['agent'] or 'unknown'}/{s['session_id']}"] = s
-    source_uri_map = drop_indexed(source_uri_map, force, label=lambda s: s["session_id"])
+    source_uri_map = drop_indexed(
+        source_uri_map, force, label=lambda s: s["session_id"], version=lambda s: s["last_active"]
+    )
     if not source_uri_map:
         return
 
@@ -122,5 +126,6 @@ def extract(
                 source_type="tsugite",
                 context=json.dumps(metadata),
                 created_at=s["created_at"],
+                source_hash=s["last_active"],
             )
         )
